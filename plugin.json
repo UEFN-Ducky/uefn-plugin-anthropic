@@ -1,0 +1,80 @@
+{
+  "id": "anthropic",
+  "kind": "plugin",
+  "version": "1.0.18",
+  "label": "Anthropic",
+  "description": "Anthropic API key + Claude Code coding agent for Settings \u2192 LLMs. Install from Store \u2192 Gateways, then enable to show Anthropic under Providers & Keys and Claude Code under Coding Agents.",
+  "min_app_version": "1.0.523",
+  "default_enabled": true,
+  "secret_keys": [
+    "anthropic"
+  ],
+  "contributes": {
+    "llm.providers": [
+      {
+        "id": "anthropic",
+        "label": "Anthropic",
+        "kind": "secret",
+        "secret_key": "anthropic",
+        "order": 10
+      }
+    ],
+    "llm.coding_agents": [
+      {
+        "id": "claude_code",
+        "label": "Claude Code",
+        "order": 90
+      }
+    ],
+    "ide.hookups": [
+      {
+        "kind": "claude",
+        "label": "Claude"
+      }
+    ],
+    "settings.sections": [
+      {
+        "tab": "LLMs",
+        "id": "prompt-caching",
+        "title": "Anthropic prompt caching",
+        "description": "Bill-discount cache_control markers on API calls. Separate from Ducky's freeze prefix (works for all providers).",
+        "order": 80,
+        "properties": [
+          {
+            "id": "promptCaching",
+            "type": "boolean",
+            "default": true,
+            "label": "Enable Anthropic cache markers",
+            "description": "Sends Anthropic cache_control on the stable system prefix, tools, and latest message."
+          },
+          {
+            "id": "extendedCacheTtl",
+            "type": "boolean",
+            "default": false,
+            "label": "Extended cache TTL (1h)",
+            "description": "Uses Anthropic's 1-hour ephemeral cache instead of the default 5-minute window."
+          }
+        ]
+      }
+    ],
+    "walkthrough": {
+      "id": "anthropic",
+      "title": "Set up Anthropic",
+      "auto_start": "first_enable",
+      "settings_tab": "LLMs",
+      "steps": [
+        {
+          "target": "settings.llms.section.llms",
+          "title": "Providers & Keys",
+          "body": "Anthropic lives under Settings \u2192 LLMs. Open Providers & Keys to paste your API key and turn on Claude Code.",
+          "advance": "require_click",
+          "mode": "rect"
+        }
+      ]
+    }
+  },
+  "backend": {
+    "entry": "backend",
+    "register": "register"
+  }
+}
