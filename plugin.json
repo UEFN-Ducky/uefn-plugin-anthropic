@@ -1,9 +1,9 @@
 {
   "id": "anthropic",
   "kind": "plugin",
-  "version": "1.0.18",
+  "version": "1.0.22",
   "label": "Anthropic",
-  "description": "Anthropic API key + Claude Code coding agent for Settings \u2192 LLMs. Install from Store \u2192 Gateways, then enable to show Anthropic under Providers & Keys and Claude Code under Coding Agents.",
+  "description": "Anthropic API key + Claude Code coding agent for Settings → LLMs. Install from Store → Gateways, then enable to show Anthropic under Providers & Keys and Claude Code under Coding Agents.",
   "min_app_version": "1.0.523",
   "default_enabled": true,
   "secret_keys": [
@@ -50,7 +50,7 @@
           {
             "id": "extendedCacheTtl",
             "type": "boolean",
-            "default": false,
+            "default": true,
             "label": "Extended cache TTL (1h)",
             "description": "Uses Anthropic's 1-hour ephemeral cache instead of the default 5-minute window."
           }
@@ -66,7 +66,7 @@
         {
           "target": "settings.llms.section.llms",
           "title": "Providers & Keys",
-          "body": "Anthropic lives under Settings \u2192 LLMs. Open Providers & Keys to paste your API key and turn on Claude Code.",
+          "body": "Anthropic lives under Settings → LLMs. Open Providers & Keys to paste your API key and turn on Claude Code.",
           "advance": "require_click",
           "mode": "rect"
         }

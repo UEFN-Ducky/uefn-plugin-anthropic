@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "deploy"
-SKIP_NAMES = {".git", "scripts", "deploy", ".gitignore", "README.md", "__pycache__"}
+SKIP_NAMES = {".git", "scripts", "deploy", ".gitignore", "README.md", "__pycache__", ".pytest_cache"}
 SKIP_SUFFIX = {".pyc", ".pyo", ".zip", ".ducky-plugin"}
 
 

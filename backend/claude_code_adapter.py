@@ -1,10 +1,8 @@
 """Claude Code CLI adapter — subprocess + stream-json + session resume.
 
-Every turn runs ``claude -p --output-format stream-json`` through the hidden
-subprocess executor (no PTY scraping): text/tool events stream live into the
-panel chat, the upstream ``session_id`` is captured from the init/result events
-and persisted by the runner, and later turns pass ``--resume`` so the agent
-keeps its memory across the whole conversation (Traycer's harness-session model).
+Every turn runs ``claude -p --output-format stream-json``. This plugin owns
+``--resume``: it captures ``session_id`` from init/result events and passes
+it back on later turns. Core only stores the id.
 """
 
 from __future__ import annotations
