@@ -128,9 +128,8 @@ def _fetch_docs_model_rows() -> list[dict[str, str]]:
     try:
         from .model_fetch import fetch_public_active_model_ids
 
-        rows = [_row(mid) for mid in fetch_public_active_model_ids() if _is_chat_model_id(mid)]
-        rows.sort(key=lambda r: r["id"], reverse=True)
-        return rows
+        # Keep the docs order: Anthropic lists newest first within each family.
+        return [_row(mid) for mid in fetch_public_active_model_ids() if _is_chat_model_id(mid)]
     except Exception:
         return []
 
@@ -248,7 +247,18 @@ def claude_code_specific_rows() -> list[dict[str, str]]:
                 with _models_lock:
                     _models_cache = stale
                 cache = stale
-        _refresh_models_async()
+        if cache is None:
+            # Cold start (fresh install, no cache yet): fetch inline so the first
+            # picker open already shows real ids instead of bare family aliases.
+            rows = _fetch_catalog_model_rows()
+            if rows:
+                with _models_lock:
+                    _models_cache = rows
+                    _models_cache_at = now
+                _write_models_disk_cache(rows)
+                cache = rows
+        else:
+            _refresh_models_async()
     return list(cache) if cache else _family_alias_rows()
 
 

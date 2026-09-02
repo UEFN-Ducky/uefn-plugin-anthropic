@@ -62,7 +62,8 @@ def fetch_public_active_model_ids() -> list[str]:
     """No API key — Anthropic's public deprecations page is the live catalog."""
     import httpx
 
-    r = httpx.get(_DEPRECATIONS_URL, follow_redirects=True, timeout=30.0)
+    # Short timeout: the cold-start path calls this inline from detect().
+    r = httpx.get(_DEPRECATIONS_URL, follow_redirects=True, timeout=10.0)
     r.raise_for_status()
     return parse_active_model_ids(r.text)
 
