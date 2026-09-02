@@ -41,10 +41,11 @@ _FAMILY_ORDER = ("opus", "sonnet", "haiku", "fable")
 _MODELS_TTL_S = 6 * 3600.0
 
 # Offline / OAuth fallback — concrete ids Claude Code accepts via --model.
-# Keep current GA aliases first (Opus 5 / Sonnet 5 / Fable 5), then recent 4.x pins.
+# Keep current GA aliases first (Opus 5 / Sonnet 5 / Fable 5.1), then recent 4.x pins.
 _FALLBACK_SPECIFIC_MODELS: tuple[tuple[str, str], ...] = (
     ("claude-opus-5", "Claude Opus 5"),
     ("claude-sonnet-5", "Claude Sonnet 5"),
+    ("claude-fable-5-1", "Claude Fable 5.1"),
     ("claude-fable-5", "Claude Fable 5"),
     ("claude-opus-4-8", "Claude Opus 4.8"),
     ("claude-opus-4-7", "Claude Opus 4.7"),
@@ -229,7 +230,7 @@ def _fallback_specific_rows() -> list[dict[str, str]]:
 def _merge_catalog_with_fallback(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     """Keep live /v1/models rows, and always include known GA ids the CLI accepts.
 
-    Partial or stale API pages must not hide Opus 5 / Sonnet 5 / Fable 5 from the picker.
+    Partial or stale API pages must not hide Opus 5 / Sonnet 5 / Fable 5.1 from the picker.
     """
     seen = {str(r.get("id") or "").strip() for r in rows}
     out = [r for r in rows if str(r.get("id") or "").strip()]
