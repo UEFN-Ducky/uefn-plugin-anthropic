@@ -6,12 +6,6 @@ from pathlib import Path
 from typing import Any
 
 _CLAUDE_FAMILIES = frozenset({"sonnet", "opus", "haiku", "fable"})
-_ANTHROPIC_FAMILY_FALLBACK = {
-    "sonnet": "claude-sonnet-5",
-    "opus": "claude-opus-5",
-    "haiku": "claude-haiku-4-5",
-    "fable": "claude-fable-5-1",
-}
 
 _INSTALL_HELP = (
     "Needs the Claude Code CLI (`claude` in PowerShell) — not the Claude Desktop chat app. "
@@ -30,19 +24,15 @@ def _fetch_models(api_key: str, **_kw: Any) -> Any:
 def _anthropic_id_for_family(family: str) -> str:
     fam = (family or "sonnet").strip().lower()
     try:
-        from backend.agent.model_fetch import fetch_models
-        from backend.agent.secrets import get_key, has_key
+        from .claude_code_adapter import claude_code_specific_rows
 
-        if has_key("anthropic"):
-            rows = fetch_models("anthropic", get_key("anthropic") or "")
-            ids = [(item.id if hasattr(item, "id") else str(item)).strip() for item in rows]
-            hits = [i for i in ids if fam in i.lower()]
-            if hits:
-                hits.sort(reverse=True)
-                return hits[0]
+        hits = [r["id"] for r in claude_code_specific_rows() if fam in r["id"].lower()]
+        if hits:
+            hits.sort(reverse=True)
+            return hits[0]
     except Exception:
         pass
-    return _ANTHROPIC_FAMILY_FALLBACK.get(fam, _ANTHROPIC_FAMILY_FALLBACK["sonnet"])
+    return fam
 
 
 def _resolve_api_fallback(model_id: str) -> tuple[str, str] | None:

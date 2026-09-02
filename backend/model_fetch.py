@@ -25,7 +25,46 @@ _CACHE_TTL_S = 6 * 3600.0
 
 
 _ANTHROPIC_PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
+_DEPRECATIONS_URL = "https://platform.claude.com/docs/en/about-claude/model-deprecations"
 _PROVIDER_PRICING_CACHE: dict[str, tuple[float, dict[str, _PricingRow]]] = {}
+_COPY_ID_RE = re.compile(r"Copy model ID (claude-[a-z0-9-]+)", re.I)
+_TR_RE = re.compile(r"<tr>(.*?)</tr>", re.S)
+_TD_RE = re.compile(r"<td[^>]*>(.*?)</td>", re.S)
+_TAG_RE = re.compile(r"<[^>]+>")
+_DATED_ID_RE = re.compile(r"-(\d{8})$")
+
+
+def canonical_model_id(model_id: str) -> str:
+    """Drop a trailing YYYYMMDD snapshot so the picker shows the CLI alias."""
+    return _DATED_ID_RE.sub("", (model_id or "").strip().lower())
+
+
+def parse_active_model_ids(html: str) -> list[str]:
+    """Active Claude API ids from the public deprecations table HTML."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for row in _TR_RE.findall(html or ""):
+        copy = _COPY_ID_RE.search(row)
+        if not copy:
+            continue
+        cells = [" ".join(_TAG_RE.sub("", c).split()) for c in _TD_RE.findall(row)]
+        if len(cells) < 2 or cells[1].lower() != "active":
+            continue
+        mid = canonical_model_id(copy.group(1))
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        out.append(mid)
+    return out
+
+
+def fetch_public_active_model_ids() -> list[str]:
+    """No API key — Anthropic's public deprecations page is the live catalog."""
+    import httpx
+
+    r = httpx.get(_DEPRECATIONS_URL, follow_redirects=True, timeout=30.0)
+    r.raise_for_status()
+    return parse_active_model_ids(r.text)
 
 
 def _pricing_catalog() -> dict[str, _PricingRow]:

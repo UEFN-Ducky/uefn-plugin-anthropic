@@ -32,30 +32,13 @@ _PERMISSION_MODES = ("acceptEdits", "bypassPermissions", "default", "plan")
 
 
 # ── Model menu ───────────────────────────────────────────────────────────────
-# `claude --model` accepts family aliases (opus/sonnet/…) *or* concrete model
-# ids (claude-opus-5). The picker lists concrete Anthropic catalog ids only —
-# no "(latest)" alias rows. Live list comes from /v1/models when an Anthropic
-# API key is set; otherwise a built-in fallback of known ids (OAuth-only logins).
+# `claude --model` accepts family aliases (opus/sonnet/…) *or* concrete ids.
+# Live list: /v1/models when an API key is set, else Anthropic's public
+# deprecations table (no key). No hardcoded version pins.
 _DEFAULT_CLAUDE_FAMILIES = ("opus", "sonnet", "haiku", "fable")
 _FAMILY_ORDER = ("opus", "sonnet", "haiku", "fable")
-_MODELS_TTL_S = 6 * 3600.0
-
-# Offline / OAuth fallback — concrete ids Claude Code accepts via --model.
-# Keep current GA aliases first (Opus 5 / Sonnet 5 / Fable 5.1), then recent 4.x pins.
-_FALLBACK_SPECIFIC_MODELS: tuple[tuple[str, str], ...] = (
-    ("claude-opus-5", "Claude Opus 5"),
-    ("claude-sonnet-5", "Claude Sonnet 5"),
-    ("claude-fable-5-1", "Claude Fable 5.1"),
-    ("claude-fable-5", "Claude Fable 5"),
-    ("claude-opus-4-8", "Claude Opus 4.8"),
-    ("claude-opus-4-7", "Claude Opus 4.7"),
-    ("claude-opus-4-6", "Claude Opus 4.6"),
-    ("claude-opus-4-5", "Claude Opus 4.5"),
-    ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
-    ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
-    ("claude-sonnet-4", "Claude Sonnet 4"),
-    ("claude-haiku-4-5", "Claude Haiku 4.5"),
-)
+_MODELS_TTL_S = 3600.0
+_CACHE_SOURCE = "live"
 
 _models_lock = threading.Lock()
 _models_cache: list[dict[str, str]] | None = None
@@ -110,35 +93,50 @@ def _is_chat_model_id(model_id: str) -> bool:
     return bool(_family_of(mid))
 
 
-def _fetch_catalog_model_rows() -> list[dict[str, str]]:
-    """Concrete Anthropic model rows from /v1/models, or [] without a key."""
+def _row(model_id: str, display_name: str = "") -> dict[str, str]:
+    mid = (model_id or "").strip()
+    return {"id": mid, "name": _display_name_for(mid, display_name), "provider": "Claude Code"}
+
+
+def _fetch_api_model_rows() -> list[dict[str, str]]:
+    """Concrete rows from /v1/models when an Anthropic API key is set."""
     try:
         from backend.agent.secrets import get_key, has_key
 
         if not has_key("anthropic"):
             return []
         from backend.agent.model_fetch import fetch_models
+        from .model_fetch import canonical_model_id
 
         rows: list[dict[str, str]] = []
         seen: set[str] = set()
         for m in fetch_models("anthropic", get_key("anthropic") or ""):
-            mid = str(getattr(m, "id", "") or "").strip()
+            mid = canonical_model_id(str(getattr(m, "id", "") or ""))
             if not mid or mid in seen or not _is_chat_model_id(mid):
                 continue
             seen.add(mid)
             dn = str(getattr(m, "display_name", "") or getattr(m, "name", "") or "")
-            rows.append(
-                {
-                    "id": mid,
-                    "name": _display_name_for(mid, dn),
-                    "provider": "Claude Code",
-                }
-            )
-        # Newest-ish first (Anthropic ids sort reasonably reverse-alpha by family/ver).
+            rows.append(_row(mid, dn))
         rows.sort(key=lambda r: r["id"], reverse=True)
         return rows
     except Exception:
         return []
+
+
+def _fetch_docs_model_rows() -> list[dict[str, str]]:
+    """OAuth / no-key path — scrape Anthropic's public active-model table."""
+    try:
+        from .model_fetch import fetch_public_active_model_ids
+
+        rows = [_row(mid) for mid in fetch_public_active_model_ids() if _is_chat_model_id(mid)]
+        rows.sort(key=lambda r: r["id"], reverse=True)
+        return rows
+    except Exception:
+        return []
+
+
+def _fetch_catalog_model_rows() -> list[dict[str, str]]:
+    return _fetch_api_model_rows() or _fetch_docs_model_rows()
 
 
 def _models_cache_path() -> Path | None:
@@ -159,6 +157,9 @@ def _read_models_disk_cache(*, allow_stale: bool = False) -> list[dict[str, str]
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(data, dict):
+        return None
+    # Ignore pre-live caches that still unioned a hardcoded fallback list.
+    if str(data.get("source") or "") != _CACHE_SOURCE:
         return None
     if not allow_stale and time.time() - float(data.get("fetched_at") or 0) > _MODELS_TTL_S:
         return None
@@ -184,7 +185,10 @@ def _write_models_disk_cache(models: list[dict[str, str]]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"fetched_at": time.time(), "models": models}, indent=2),
+            json.dumps(
+                {"fetched_at": time.time(), "source": _CACHE_SOURCE, "models": models},
+                indent=2,
+            ),
             encoding="utf-8",
         )
     except OSError:
@@ -204,10 +208,9 @@ def _refresh_models_async() -> None:
         rows = _fetch_catalog_model_rows()
         with _models_lock:
             if rows:
-                merged = _merge_catalog_with_fallback(rows)
-                _models_cache = merged
+                _models_cache = rows
                 _models_cache_at = time.time()
-                _write_models_disk_cache(merged)
+                _write_models_disk_cache(rows)
             _models_refreshing = False
 
     threading.Thread(target=_worker, name="claude-code-models", daemon=True).start()
@@ -220,27 +223,9 @@ def claude_code_families() -> tuple[str, ...]:
     return _order_families(families) if families else _DEFAULT_CLAUDE_FAMILIES
 
 
-def _fallback_specific_rows() -> list[dict[str, str]]:
-    return [
-        {"id": mid, "name": name, "provider": "Claude Code"}
-        for mid, name in _FALLBACK_SPECIFIC_MODELS
-    ]
-
-
-def _merge_catalog_with_fallback(rows: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Keep live /v1/models rows, and always include known GA ids the CLI accepts.
-
-    Partial or stale API pages must not hide Opus 5 / Sonnet 5 / Fable 5.1 from the picker.
-    """
-    seen = {str(r.get("id") or "").strip() for r in rows}
-    out = [r for r in rows if str(r.get("id") or "").strip()]
-    for mid, name in _FALLBACK_SPECIFIC_MODELS:
-        if mid in seen:
-            continue
-        out.append({"id": mid, "name": name, "provider": "Claude Code"})
-        seen.add(mid)
-    out.sort(key=lambda r: r["id"], reverse=True)
-    return out
+def _family_alias_rows() -> list[dict[str, str]]:
+    # ponytail: CLI family aliases only when live fetch+cache are empty. Not version pins.
+    return [_row(fam, f"Claude {fam.title()}") for fam in _DEFAULT_CLAUDE_FAMILIES]
 
 
 def claude_code_specific_rows() -> list[dict[str, str]]:
@@ -264,9 +249,7 @@ def claude_code_specific_rows() -> list[dict[str, str]]:
                     _models_cache = stale
                 cache = stale
         _refresh_models_async()
-    if cache:
-        return _merge_catalog_with_fallback(list(cache))
-    return _fallback_specific_rows()
+    return list(cache) if cache else _family_alias_rows()
 
 
 def claude_code_model_rows() -> list[dict[str, str]]:
