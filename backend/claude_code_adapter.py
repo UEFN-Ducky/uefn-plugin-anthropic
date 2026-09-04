@@ -35,7 +35,6 @@ _PERMISSION_MODES = ("acceptEdits", "bypassPermissions", "default", "plan")
 # `claude --model` accepts family aliases (opus/sonnet/…) *or* concrete ids.
 # Live list: /v1/models when an API key is set, else Anthropic's public
 # deprecations table (no key). No hardcoded version pins.
-_DEFAULT_CLAUDE_FAMILIES = ("opus", "sonnet", "haiku", "fable")
 _FAMILY_ORDER = ("opus", "sonnet", "haiku", "fable")
 _MODELS_TTL_S = 3600.0
 _CACHE_SOURCE = "live"
@@ -219,12 +218,7 @@ def claude_code_families() -> tuple[str, ...]:
     """Family aliases for the '(latest)' shortcuts at the top of the menu."""
     rows = claude_code_specific_rows()
     families = {fam for r in rows if (fam := _family_of(r["id"]))}
-    return _order_families(families) if families else _DEFAULT_CLAUDE_FAMILIES
-
-
-def _family_alias_rows() -> list[dict[str, str]]:
-    # ponytail: CLI family aliases only when live fetch+cache are empty. Not version pins.
-    return [_row(fam, f"Claude {fam.title()}") for fam in _DEFAULT_CLAUDE_FAMILIES]
+    return _order_families(families)
 
 
 def claude_code_specific_rows() -> list[dict[str, str]]:
@@ -259,7 +253,7 @@ def claude_code_specific_rows() -> list[dict[str, str]]:
                 cache = rows
         else:
             _refresh_models_async()
-    return list(cache) if cache else _family_alias_rows()
+    return list(cache) if cache else []
 
 
 def claude_code_model_rows() -> list[dict[str, str]]:

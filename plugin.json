@@ -1,7 +1,7 @@
 {
   "id": "anthropic",
   "kind": "plugin",
-  "version": "1.0.25",
+  "version": "1.0.26",
   "label": "Anthropic",
   "description": "Anthropic API key + Claude Code coding agent for Settings → LLMs. Install from Store → Gateways, then enable to show Anthropic under Providers & Keys and Claude Code under Coding Agents.",
   "min_app_version": "1.0.523",
