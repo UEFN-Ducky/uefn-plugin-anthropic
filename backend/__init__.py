@@ -8,10 +8,10 @@ from typing import Any
 _CLAUDE_FAMILIES = frozenset({"sonnet", "opus", "haiku", "fable"})
 
 _INSTALL_HELP = (
-    "Needs the Claude Code CLI (`claude` in PowerShell) — not the Claude Desktop chat app. "
-    "Install in Windows PowerShell (not Git Bash): irm https://claude.ai/install.ps1 | iex "
-    "Then add %USERPROFILE%\\.local\\bin to your user PATH, open a new PowerShell, run claude --version, "
-    "restart Ducky, and click Detect."
+    "Ducky installs and updates the Claude Code CLI for you when this plugin "
+    "is installed or updated — you should not run `claude update` yourself. "
+    "If it is still missing, Ducky will retry on the next chat. Needs the "
+    "`claude` CLI (not the Claude Desktop chat app)."
 )
 
 
@@ -275,4 +275,10 @@ def register(api) -> None:
         shows_thinking_effort=True,
     )
     api.register_ide_hookup("claude", label="Claude")
+    try:
+        from .cli_update import schedule_cli_update_on_plugin_load
+
+        schedule_cli_update_on_plugin_load()
+    except Exception:
+        pass
     api.log("Anthropic gateway contribution active (Providers + Claude Code + IDE)")

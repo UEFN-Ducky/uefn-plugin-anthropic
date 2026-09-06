@@ -291,8 +291,9 @@ def _claude_code_missing_status() -> str:
             f"{_CLAUDE_CODE_PATH_HINT} to your user PATH, restart terminals and Ducky."
         )
     return (
-        "Claude Code CLI not found — needs the `claude` terminal command (not Claude Desktop). "
-        f"Install in Windows PowerShell: {_CLAUDE_CODE_INSTALL_PS}"
+        "Claude Code CLI not found — Ducky will install it automatically "
+        "(not Claude Desktop). If this stays, send another message or "
+        f"Settings → Store → Update Anthropic. Manual fallback: {_CLAUDE_CODE_INSTALL_PS}"
     )
 
 
@@ -805,8 +806,17 @@ class ClaudeCodeAdapter:
         path = resolve_claude_bin(override)
         default_args = str(cfg.get("default_args") or "")
         if path:
+            from .cli_update import read_cli_version, status_text
+
             logged_in = is_claude_logged_in(override or path)
-            status = f"Found: {path}" + (" · logged in" if logged_in else " · not logged in (chat will prompt)")
+            ver = read_cli_version(path)
+            extra = status_text()
+            status = f"Found: {path}"
+            if ver:
+                status += f" · v{ver}"
+            status += " · logged in" if logged_in else " · not logged in (chat will prompt)"
+            if extra and extra not in status:
+                status += f" · {extra}"
             available = enabled
         else:
             status = _claude_code_missing_status()
@@ -981,6 +991,64 @@ class ClaudeCodeAdapter:
             new_session = state.session_id or session_id
 
             # A stale --resume id makes the CLI exit with "No conversation found".
+            result = finalize_cli_turn(
+                proc=proc,
+                reply=reply,
+                streamed=bool(streamed) or bool(blocks),
+                blocks=blocks,
+                session_id=session_id,
+                new_session=new_session,
+                usage=state.usage,
+                agent_label="Claude Code",
+                timeout_s=timeout_s,
+                error_text=state.error_text,
+                stale_session_markers=("no conversation found",),
+            )
+            from .cli_update import is_cli_too_old_error, update_claude_cli
+
+            if result.ok or not is_cli_too_old_error(
+                result.error or "",
+                result.reply_text or "",
+                proc.stderr_tail,
+                proc.raw_tail,
+                state.error_text,
+            ):
+                return result
+            push(
+                {
+                    "type": "status",
+                    "text": "Claude Code CLI is too old for this model — updating automatically…",
+                    "conv_id": conv_id,
+                    "run_id": run_id,
+                }
+            )
+            upd = update_claude_cli(binary)
+            if not upd.get("ok"):
+                result.error = (
+                    (result.error or "")
+                    + "\n\nDucky tried to update Claude Code automatically and failed: "
+                    + str(upd.get("error") or "unknown")
+                )
+                return result
+            binary = resolve_claude_bin(cli_path) or str(upd.get("cli_path") or binary)
+            argv[0] = binary
+            state = _StreamState(conv_id, run_id, push)
+            proc = run_streaming_process(
+                argv=argv,
+                cwd=cwd,
+                env_extra=env,
+                conv_id=conv_id,
+                on_line=state.on_line,
+                timeout_s=timeout_s,
+                cancel=cancel,
+                stdin_data=full_prompt,
+            )
+            state.flush_stream()
+            state.finish_unresolved_tools(cancelled=proc.cancelled)
+            blocks = state.finalize_blocks()
+            streamed = "".join(state.streamed_text).strip()
+            reply = state.final_text or state.trailing_text() or ("" if blocks else streamed)
+            new_session = state.session_id or session_id
             return finalize_cli_turn(
                 proc=proc,
                 reply=reply,
