@@ -1,7 +1,7 @@
 {
   "id": "anthropic",
   "kind": "plugin",
-  "version": "1.0.27",
+  "version": "1.0.28",
   "label": "Anthropic",
   "description": "Anthropic API key + Claude Code coding agent for Settings → LLMs. Install from Store → Gateways, then enable to show Anthropic under Providers & Keys and Claude Code under Coding Agents.",
   "min_app_version": "1.0.523",
@@ -64,10 +64,31 @@
       "settings_tab": "LLMs",
       "steps": [
         {
-          "target": "settings.llms.section.llms",
-          "title": "Providers & Keys",
-          "body": "Anthropic lives under Settings → LLMs. Open Providers & Keys to paste your API key and turn on Claude Code.",
+          "target": "settings.llms.provider.anthropic",
+          "title": "Open Anthropic",
+          "body": "Press the Anthropic row in this table. The page slides open so you can paste a key or use Claude Code.",
           "advance": "require_click",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.key",
+          "title": "API key or Claude Code",
+          "body": "Paste your Anthropic API key here to use Claude in Ducky chats. No key? Skip this and use Claude Code on this same slide.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.save",
+          "title": "Test & Save",
+          "body": "Press Test & Save after you paste a key. Using Claude Code without a key? Press Skip.",
+          "advance": "require_click",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.agent",
+          "title": "Claude Code",
+          "body": "Claude Code is Anthropic's coding agent. Detect finds the CLI. Keep it on to pick Claude Code in chat.",
+          "advance": "next",
           "mode": "rect"
         }
       ]
