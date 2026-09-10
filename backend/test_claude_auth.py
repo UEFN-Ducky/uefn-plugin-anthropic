@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from claude_auth import _logout_argv, _rejection_line, extract_auth_url, looks_like_auth_code
+from claude_auth import (
+    SETTINGS_LOGIN_HREF,
+    _logout_argv,
+    _rejection_line,
+    extract_auth_url,
+    looks_like_auth_code,
+    settings_login_message,
+    submit_claude_login_code,
+    tail_says_logged_in,
+)
 
 _URL = (
     "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a"
@@ -41,10 +50,40 @@ def test_logout_argv():
     assert _logout_argv(r"C:\claude.exe") == [r"C:\claude.exe", "auth", "logout"]
 
 
+def test_chat_points_at_settings_not_codes():
+    msg = settings_login_message()
+    assert SETTINGS_LOGIN_HREF in msg
+    assert "Do not paste a code" in msg
+    assert "Settings → LLMs → Anthropic" in msg
+    assert "sign-in link" in msg
+    assert "box for the code" in msg
+    assert "terminal" not in msg.lower()
+
+
+def test_tail_logged_in():
+    assert tail_says_logged_in("Logged in as  you@anthropic.com")
+    assert not tail_says_logged_in("Not logged in")
+    assert not tail_says_logged_in("Paste code here")
+
+
+def test_submit_rejects_junk_without_a_session():
+    bad = submit_claude_login_code(code="not a code", conv_id="__test_no_session__")
+    assert bad["ok"] is False
+    missing = submit_claude_login_code(
+        code="svVbMkUV0dJFzHV9KX_M3Ln9jPd5dTsL#gcqp3x991kcfSlwLT5qn",
+        conv_id="__test_no_session__",
+    )
+    assert missing["ok"] is False
+    assert "Press Log in" in str(missing.get("error") or "")
+
+
 if __name__ == "__main__":
     test_url_is_clean_of_ansi()
     test_code_hash_state_is_a_code()
     test_words_and_sentences_are_not_codes()
     test_rejection_is_claudes_line_or_empty()
     test_logout_argv()
+    test_chat_points_at_settings_not_codes()
+    test_tail_logged_in()
+    test_submit_rejects_junk_without_a_session()
     print("ok")

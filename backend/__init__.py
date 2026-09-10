@@ -126,7 +126,7 @@ def _before_launch(
         continue_claude_login,
         get_pending_auth,
         is_claude_logged_in,
-        start_claude_login,
+        prompt_claude_login_in_settings,
     )
 
     pending = get_pending_auth(conv.id)
@@ -134,42 +134,32 @@ def _before_launch(
         outcome = continue_claude_login(
             conv_id=conv.id, user_text=user_text, cli_path=cli_path, push=push
         )
+        if outcome.get("logged_in") and outcome.get("deferred_prompt") is not None:
+            return {"__run_prompt__": str(outcome.get("deferred_prompt") or "")}
         if outcome.get("restart"):
             clear_pending_auth(conv.id)
-            deferred = str(outcome.get("deferred_prompt") or user_text)
-            started = start_claude_login(
+            started = prompt_claude_login_in_settings(
                 conv_id=conv.id,
-                cwd=cwd,
-                cli_path=cli_path,
-                deferred_prompt=deferred,
+                deferred_prompt=str(outcome.get("deferred_prompt") or user_text),
                 push=push,
             )
-            why = str(outcome.get("error") or "")
             return emit_assistant(
                 conv,
                 agent_id=agent_id,
-                reply=(f"{why}\n\n" if why else "")
-                + str(started.get("message") or started.get("error") or ""),
+                reply=str(started.get("message") or ""),
                 push=push,
                 run_id=run_id,
                 ok=True,
-                terminal_session_id=str(started.get("terminal_session_id") or ""),
                 status="needs_login",
             )
-        if outcome.get("logged_in") and outcome.get("deferred_prompt") is not None:
-            return {"__run_prompt__": str(outcome.get("deferred_prompt") or "")}
         return emit_assistant(
             conv,
             agent_id=agent_id,
             reply=str(outcome.get("message") or outcome.get("error") or "Login still pending."),
             push=push,
             run_id=run_id,
-            # Waiting on the user is not a failed turn — no red "Interrupted" banner.
             ok=bool(outcome.get("ok") or outcome.get("needs_login")),
             error=str(outcome.get("error") or ""),
-            terminal_session_id=str(
-                outcome.get("terminal_session_id") or pending.get("terminal_session_id") or ""
-            ),
             status="needs_login"
             if outcome.get("needs_login")
             else ("done" if outcome.get("ok") else "error"),
@@ -178,27 +168,19 @@ def _before_launch(
     if is_claude_logged_in(cli_path):
         return None
 
-    started = start_claude_login(
+    started = prompt_claude_login_in_settings(
         conv_id=conv.id,
-        cwd=cwd,
-        cli_path=cli_path,
         deferred_prompt=user_text,
         push=push,
     )
-    if started.get("logged_in"):
-        return None
     return emit_assistant(
         conv,
         agent_id=agent_id,
-        reply=str(started.get("message") or started.get("error") or "Claude login required."),
+        reply=str(started.get("message") or "Claude login required."),
         push=push,
         run_id=run_id,
-        ok=bool(started.get("ok") or started.get("needs_login")),
-        error=str(started.get("error") or ""),
-        terminal_session_id=str(started.get("terminal_session_id") or ""),
-        status="needs_login"
-        if started.get("needs_login")
-        else ("done" if started.get("ok") else "error"),
+        ok=True,
+        status="needs_login",
     )
 
 
@@ -216,12 +198,10 @@ def _on_needs_login(
     emit_assistant: Any,
     **_kw: Any,
 ) -> dict[str, Any]:
-    from .claude_auth import start_claude_login
+    from .claude_auth import prompt_claude_login_in_settings
 
-    started = start_claude_login(
+    started = prompt_claude_login_in_settings(
         conv_id=conv.id,
-        cwd=cwd,
-        cli_path=cli_path,
         deferred_prompt=user_text,
         push=push,
     )
@@ -232,26 +212,34 @@ def _on_needs_login(
         push=push,
         run_id=run_id,
         ok=True,
-        terminal_session_id=str(
-            started.get("terminal_session_id") or getattr(result, "terminal_session_id", "") or ""
-        ),
         status="needs_login",
         blocks=getattr(result, "blocks", None),
     )
 
 
 def _login(*, cwd: str = "", cli_path: str = "", push: Any = None, **_kw: Any) -> dict[str, Any]:
-    """Settings → Coding agent → Log in: same terminal + browser flow as the chat,
-    but with no chat turn. The user finishes in the browser / terminal tab."""
-    from .claude_auth import start_claude_login
+    """Settings → Log in: hidden CLI + modal (URL + code). No terminal tab."""
+    from .claude_auth import SETTINGS_CONV, start_claude_login
 
     return start_claude_login(
-        conv_id="__settings__",
+        conv_id=SETTINGS_CONV,
         cwd=cwd,
         cli_path=cli_path,
         deferred_prompt="",
         push=push,
     )
+
+
+def _login_submit(*, code: str = "", cli_path: str = "", **_kw: Any) -> dict[str, Any]:
+    from .claude_auth import SETTINGS_CONV, submit_claude_login_code
+
+    return submit_claude_login_code(code=code, cli_path=cli_path, conv_id=SETTINGS_CONV)
+
+
+def _login_status(*, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
+    from .claude_auth import SETTINGS_CONV, claude_login_status
+
+    return claude_login_status(cli_path=cli_path, conv_id=SETTINGS_CONV)
 
 
 def _logout(*, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
@@ -289,6 +277,8 @@ def register(api) -> None:
         before_launch=_before_launch,
         on_needs_login=_on_needs_login,
         login=_login,
+        login_submit=_login_submit,
+        login_status=_login_status,
         logout=_logout,
         settings_defaults={
             "enabled": True,

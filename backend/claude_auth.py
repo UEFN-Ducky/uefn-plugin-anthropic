@@ -7,7 +7,6 @@ import os
 import re
 import subprocess
 import time
-import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +20,9 @@ _URL_RE = re.compile(
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x07")
 _DONE_WORDS = frozenset({"done", "logged in", "ok", "ready", "continue", "yes", "y"})
 _PENDING_PATH = default_app_data_dir() / "coding_agents" / "auth_pending.json"
+SETTINGS_LOGIN_HREF = "ducky://settings.llms/anthropic#login"
+SETTINGS_CONV = "__settings__"
+_URL_WAIT_S = 3.0
 
 
 def _default_claude_bin() -> str:
@@ -117,13 +119,9 @@ def extract_auth_url(text: str) -> str:
     return matches[0].rstrip(").,]}") if matches else ""
 
 
-def open_auth_url(url: str) -> bool:
-    if not url:
-        return False
-    try:
-        return bool(webbrowser.open(url, new=2))
-    except Exception:
-        return False
+def tail_says_logged_in(text: str) -> bool:
+    s = _ANSI_RE.sub(" ", text or "").lower()
+    return "logged in" in s and "not logged" not in s
 
 
 def _load_pending() -> dict[str, Any]:
@@ -170,6 +168,103 @@ def looks_like_auth_code(text: str) -> bool:
     return 8 <= len(s) <= 2048
 
 
+def settings_login_message() -> str:
+    return "\n".join(
+        [
+            "## Claude Code login required",
+            "",
+            "Login happens in **Settings**, not in this chat. Do not paste a code here.",
+            "",
+            f"[Open Settings → Anthropic and log in]({SETTINGS_LOGIN_HREF})",
+            "",
+            "That opens Settings → LLMs → Anthropic and highlights **Log in**. "
+            "Press it — a window shows the sign-in link and a box for the code.",
+        ]
+    )
+
+
+def push_open_settings_login(push: Any) -> None:
+    if not push:
+        return
+    try:
+        push(
+            {
+                "type": "open_coding_agent_login",
+                "provider_id": "anthropic",
+                "title": "Log in to Claude Code",
+                "text": (
+                    "Press Log in. A window shows the sign-in link and a box "
+                    "for the code — never paste a code in chat."
+                ),
+            }
+        )
+    except Exception:
+        pass
+
+
+def prompt_claude_login_in_settings(
+    *,
+    conv_id: str,
+    deferred_prompt: str,
+    push: Any,
+) -> dict[str, Any]:
+    """Chat path: open Settings + spotlight Log in. Never collect codes in chat."""
+    set_pending_auth(
+        conv_id,
+        {
+            "agent": "claude_code",
+            "deferred_prompt": deferred_prompt,
+            "started": time.time(),
+            "via": "settings",
+        },
+    )
+    push_open_settings_login(push)
+    return {
+        "ok": True,
+        "needs_login": True,
+        "logged_in": False,
+        "message": settings_login_message(),
+    }
+
+
+def _pending_session(conv_id: str) -> tuple[dict[str, Any] | None, Any]:
+    """Return (pending row, live terminal session or None)."""
+    pending = get_pending_auth(conv_id)
+    if not pending:
+        return None, None
+    sid = str(pending.get("terminal_session_id") or "").strip()
+    if not sid:
+        return pending, None
+    try:
+        from frontend.ui_web.terminal import get_terminal_manager
+
+        session = get_terminal_manager().get_session(sid)
+    except Exception:
+        return pending, None
+    if session is None or not session.is_alive():
+        return pending, None
+    return pending, session
+
+
+def _url_from_session(session: Any, pending: dict[str, Any] | None = None) -> str:
+    url = extract_auth_url(session.read_output_tail(16000) if session else "")
+    if not url and pending:
+        url = str(pending.get("auth_url") or "")
+    return url
+
+
+def _kill_login_session(session_id: str) -> None:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return
+    try:
+        from frontend.ui_web.terminal import get_terminal_manager
+
+        get_terminal_manager().kill(sid, push_close=False)
+    except Exception:
+        pass
+
+
 def start_claude_login(
     *,
     conv_id: str,
@@ -178,8 +273,27 @@ def start_claude_login(
     deferred_prompt: str,
     push: Any,
 ) -> dict[str, Any]:
-    """Open a terminal running `claude auth login`, open browser when URL appears."""
+    """Start `claude auth login` in a hidden terminal. The Settings modal
+    shows the URL and submits the code via submit_claude_login_code."""
     from frontend.ui_web.terminal import get_terminal_manager
+
+    _ = push
+
+    pending, session = _pending_session(conv_id)
+    if session is not None:
+        url = _url_from_session(session, pending)
+        if url and pending and url != pending.get("auth_url"):
+            pending = {**pending, "auth_url": url}
+            set_pending_auth(conv_id, pending)
+        return {
+            "ok": True,
+            "needs_login": True,
+            "logged_in": False,
+            "login_ui": "code_modal",
+            "auth_url": url,
+            "terminal_session_id": str((pending or {}).get("terminal_session_id") or session.id),
+            "message": "Open the sign-in link, then paste the code in the box.",
+        }
 
     binary = resolve_claude_bin(cli_path) or "claude"
     mgr = get_terminal_manager()
@@ -191,20 +305,20 @@ def start_claude_login(
         shell="powershell",
         cwd=workdir,
         title="Claude Login",
-        push_open=True,
+        push_open=False,
+        hidden=True,
         conv_id=conv_id,
     )
     if not spawn.get("ok"):
-        return {"ok": False, "error": str(spawn.get("error") or "failed to open terminal")}
+        return {"ok": False, "error": str(spawn.get("error") or "failed to start login")}
 
     session_id = str(spawn.get("session_id") or spawn.get("id") or "").strip()
     if not session_id:
-        return {"ok": False, "error": "terminal session missing id"}
+        return {"ok": False, "error": "login session missing id"}
 
     session = mgr.get_session(session_id)
     if session is None:
-        return {"ok": False, "error": "terminal session disappeared"}
-    _push_terminal_open(push, session, conv_id)
+        return {"ok": False, "error": "login session disappeared"}
 
     if os.name == "nt":
         cmd = f"& {_ps_quote(binary)} auth login"
@@ -214,20 +328,11 @@ def start_claude_login(
     session.run_command(cmd, background=True)
 
     url = ""
-    deadline = time.time() + 25.0
+    deadline = time.time() + _URL_WAIT_S
     while time.time() < deadline and not url:
-        time.sleep(0.4)
-        url = extract_auth_url(session.read_output_tail(12000))
-        if is_claude_logged_in(cli_path):
-            clear_pending_auth(conv_id)
-            return {
-                "ok": True,
-                "logged_in": True,
-                "terminal_session_id": session_id,
-                "message": "Claude Code is already logged in.",
-            }
+        time.sleep(0.25)
+        url = extract_auth_url(session.read_output_tail(16000))
 
-    opened = open_auth_url(url) if url else False
     set_pending_auth(
         conv_id,
         {
@@ -238,53 +343,77 @@ def start_claude_login(
             "started": time.time(),
         },
     )
-
-    lines = [
-        "## Claude Code login required",
-        "",
-        "You're not signed in to Claude Code yet. Ducky started the login flow.",
-    ]
-    if url:
-        lines += [
-            "",
-            "1. A browser window should open (or open this URL):",
-            "",
-            url,
-            "",
-        ]
-        if opened:
-            lines.append("Browser open was requested from Ducky.")
-        else:
-            lines.append("Browser did not open automatically — paste the URL into Chrome.")
-        lines += [
-            "",
-            "2. Sign in / authorize in the browser.",
-            "3. If Claude asks for a code, **paste that code here as your next chat message**.",
-            "4. Or reply `done` after the browser finishes.",
-            "",
-            "Your original request will run automatically after login.",
-        ]
-    else:
-        lines += [
-            "",
-            "No login URL appeared yet — check the **Claude Login** terminal tab.",
-            "When you see the URL, open it in Chrome, then paste the code here (or reply `done`).",
-        ]
-
-    msg = "\n".join(lines)
-    if push:
-        try:
-            push({"type": "status", "text": "Claude login required…", "conv_id": conv_id})
-        except Exception:
-            pass
     return {
         "ok": True,
         "needs_login": True,
         "logged_in": False,
+        "login_ui": "code_modal",
         "auth_url": url,
-        "browser_opened": opened,
         "terminal_session_id": session_id,
-        "message": msg,
+        "message": "Open the sign-in link, then paste the code in the box.",
+    }
+
+
+def claude_login_status(*, cli_path: str = "", conv_id: str = SETTINGS_CONV) -> dict[str, Any]:
+    """Refresh the sign-in URL from the hidden CLI; report logged_in when done."""
+    pending, session = _pending_session(conv_id)
+    if session is not None and tail_says_logged_in(session.read_output_tail(16000)):
+        if is_claude_logged_in(cli_path):
+            sid = str((pending or {}).get("terminal_session_id") or "")
+            clear_pending_auth(conv_id)
+            _kill_login_session(sid)
+            return {"ok": True, "logged_in": True, "needs_login": False}
+    url = _url_from_session(session, pending) if session is not None else str((pending or {}).get("auth_url") or "")
+    if url and pending and session is not None and url != pending.get("auth_url"):
+        pending = {**pending, "auth_url": url}
+        set_pending_auth(conv_id, pending)
+    return {
+        "ok": True,
+        "logged_in": False,
+        "needs_login": True,
+        "login_ui": "code_modal",
+        "auth_url": url,
+        "terminal_session_id": str((pending or {}).get("terminal_session_id") or ""),
+    }
+
+
+def submit_claude_login_code(
+    *,
+    code: str,
+    cli_path: str = "",
+    conv_id: str = SETTINGS_CONV,
+) -> dict[str, Any]:
+    """Write the OAuth code into the hidden `claude auth login` process."""
+    text = (code or "").strip().strip("`")
+    if not looks_like_auth_code(text):
+        return {"ok": False, "error": "That doesn't look like a login code."}
+
+    pending, session = _pending_session(conv_id)
+    if session is None:
+        return {"ok": False, "error": "Login isn't waiting for a code yet. Press Log in again."}
+
+    before = session.read_output_tail(8000)
+    session.write(text + "\r\n")
+    deadline = time.time() + 25.0
+    next_cli = time.time() + 2.0
+    while time.time() < deadline:
+        time.sleep(0.35)
+        tail = session.read_output_tail(16000)
+        new = tail[len(before) :] if tail.startswith(before) else tail
+        reject = _rejection_line(new)
+        if reject:
+            return {"ok": False, "logged_in": False, "error": reject}
+        if tail_says_logged_in(tail) or time.time() >= next_cli:
+            next_cli = time.time() + 4.0
+            if is_claude_logged_in(cli_path):
+                sid = str((pending or {}).get("terminal_session_id") or session.id)
+                clear_pending_auth(conv_id)
+                _kill_login_session(sid)
+                return {"ok": True, "logged_in": True, "message": "Logged in to Claude Code."}
+    return {
+        "ok": False,
+        "logged_in": False,
+        "error": "Still waiting for Claude to accept the code.",
     }
 
 
@@ -304,27 +433,6 @@ def _rejection_line(new_output: str) -> str:
     return ""
 
 
-def _push_terminal_open(push: Any, session: Any, conv_id: str) -> None:
-    """Open/raise the login tab via the run's own push. The manager's push hook
-    is only wired once by the panel window; the run push always reaches the chat."""
-    if not push:
-        return
-    try:
-        push(
-            {
-                "type": "terminal_open",
-                "session_id": session.id,
-                "shell": session.shell,
-                "title": session.title,
-                "cwd": session.cwd,
-                "ws_url": session.ws_url,
-                "conv_id": conv_id,
-            }
-        )
-    except Exception:
-        pass
-
-
 def continue_claude_login(
     *,
     conv_id: str,
@@ -332,7 +440,7 @@ def continue_claude_login(
     cli_path: str,
     push: Any = None,
 ) -> dict[str, Any]:
-    """Handle the user's follow-up (auth code or 'done') during pending login."""
+    """Follow-up while Settings login is pending. Chat never accepts an auth code."""
     pending = get_pending_auth(conv_id)
     if not pending:
         return {"ok": False, "error": "no pending login"}
@@ -343,92 +451,32 @@ def continue_claude_login(
         return {"ok": True, "logged_in": True, "deferred_prompt": deferred, "message": "Login complete."}
 
     text = (user_text or "").strip().strip("`")
-    session_id = str(pending.get("terminal_session_id") or "")
     low = text.lower()
-    url = str(pending.get("auth_url") or "")
+    push_open_settings_login(push)
 
-    if looks_like_auth_code(text) and session_id:
-        from frontend.ui_web.terminal import get_terminal_manager
-
-        mgr = get_terminal_manager()
-        session = mgr.get_session(session_id)
-        if session is None or not session.is_alive():
-            return {
-                "ok": False,
-                "error": "Login terminal closed — send another message to restart login.",
-                "restart": True,
-                "deferred_prompt": str(pending.get("deferred_prompt") or ""),
-            }
-        _push_terminal_open(push, session, conv_id)
-        try:
-            session.write(text + "\r\n")
-        except Exception as exc:
-            return {"ok": False, "error": f"Could not send code to terminal: {exc}"}
-
-        before = len(session.read_output_tail(60000))
-        deadline = time.time() + 45.0
-        while time.time() < deadline:
-            time.sleep(0.5)
-            if is_claude_logged_in(cli_path):
-                deferred = str(pending.get("deferred_prompt") or "")
-                clear_pending_auth(conv_id)
-                return {
-                    "ok": True,
-                    "logged_in": True,
-                    "deferred_prompt": deferred,
-                    "message": "Login complete — running your original request…",
-                }
-            rejected = _rejection_line(session.read_output_tail(60000)[before:])
-            if rejected:
-                # A rejected OAuth code is single-use — only a fresh URL can recover.
-                return {
-                    "ok": False,
-                    "restart": True,
-                    "deferred_prompt": str(pending.get("deferred_prompt") or ""),
-                    "error": f"Claude rejected that code: {rejected}",
-                }
+    if looks_like_auth_code(text):
         return {
             "ok": True,
             "needs_login": True,
             "message": (
-                "Code sent — Claude is still finishing sign-in. "
-                "Reply `done` in a moment and I'll run your request."
+                "Don't paste login codes in chat — they belong in Settings.\n\n"
+                + settings_login_message()
             ),
-            "auth_url": url,
-            "terminal_session_id": session_id,
         }
 
     if low in _DONE_WORDS:
-        if is_claude_logged_in(cli_path):
-            deferred = str(pending.get("deferred_prompt") or "")
-            clear_pending_auth(conv_id)
-            return {
-                "ok": True,
-                "logged_in": True,
-                "deferred_prompt": deferred,
-                "message": "Login complete — running your original request…",
-            }
         return {
             "ok": True,
             "needs_login": True,
             "message": (
-                "Still not logged in. Open the URL in Chrome, finish authorize, "
-                "then reply `done` again — or paste the auth code here.\n\n"
-                + url
+                "Still not logged in. Use the highlighted **Log in** on "
+                "Settings → LLMs → Anthropic, then reply `done`.\n\n"
+                + settings_login_message()
             ),
-            "auth_url": url,
-            "terminal_session_id": session_id,
         }
 
-    # Any other message while pending: remind
     return {
         "ok": True,
         "needs_login": True,
-        "message": (
-            "Claude login is still pending.\n\n"
-            "Paste the auth **code** from the browser, or reply `done` after signing in.\n\n"
-            + (f"Login URL:\n{url}" if url else "Check the Claude Login terminal for the URL.")
-        ),
-        "auth_url": url,
-        "terminal_session_id": session_id,
+        "message": settings_login_message(),
     }
