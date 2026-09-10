@@ -1,7 +1,7 @@
 {
   "id": "anthropic",
   "kind": "plugin",
-  "version": "1.0.28",
+  "version": "1.0.29",
   "label": "Anthropic",
   "description": "Anthropic API key + Claude Code coding agent for Settings → LLMs. Install from Store → Gateways, then enable to show Anthropic under Providers & Keys and Claude Code under Coding Agents.",
   "min_app_version": "1.0.523",
@@ -85,10 +85,45 @@
           "mode": "rect"
         },
         {
+          "target": "settings.llms.provider.ide",
+          "title": "IDE / MCP connection",
+          "body": "IDE / MCP wires UEFN tools and Ducky skills into Claude globally (every project). Apply once, then Test. Green check = up to date.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.ide.apply",
+          "title": "Apply connection",
+          "body": "Press Apply (or Re-apply) so UEFN MCP and Ducky skills land in Claude. Then Test — a green check means connected.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
           "target": "settings.llms.provider.agent",
           "title": "Claude Code",
-          "body": "Claude Code is Anthropic's coding agent. Detect finds the CLI. Keep it on to pick Claude Code in chat.",
+          "body": "Claude Code is Anthropic's coding agent. Detect finds the CLI (often under .local\\bin). Keep it on to pick Claude Code in chat.",
           "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.agent.detect",
+          "title": "Detect CLI",
+          "body": "Press Detect to find Claude Code on this machine. Leave the toggle on so it appears in the chat picker.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.provider.plugin",
+          "title": "Anthropic prompt caching",
+          "body": "Cache markers discount repeated Anthropic prefixes. Extended TTL keeps that cache for an hour — leave both on unless you have a reason not to.",
+          "advance": "next",
+          "mode": "rect"
+        },
+        {
+          "target": "settings.llms.back",
+          "title": "Back",
+          "body": "Press Back to return to the provider list.",
+          "advance": "require_click",
           "mode": "rect"
         }
       ]
