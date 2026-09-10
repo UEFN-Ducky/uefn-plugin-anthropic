@@ -254,6 +254,12 @@ def _login(*, cwd: str = "", cli_path: str = "", push: Any = None, **_kw: Any) -
     )
 
 
+def _logout(*, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
+    from .claude_auth import claude_logout
+
+    return claude_logout(cli_path)
+
+
 def register(api) -> None:
     from .anthropic_provider import AnthropicProvider
     from .claude_code_adapter import ClaudeCodeAdapter
@@ -283,6 +289,7 @@ def register(api) -> None:
         before_launch=_before_launch,
         on_needs_login=_on_needs_login,
         login=_login,
+        logout=_logout,
         settings_defaults={
             "enabled": True,
             "cli_path": "",

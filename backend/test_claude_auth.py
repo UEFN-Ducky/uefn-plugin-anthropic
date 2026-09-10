@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from claude_auth import _rejection_line, extract_auth_url, looks_like_auth_code
+from claude_auth import _logout_argv, _rejection_line, extract_auth_url, looks_like_auth_code
 
 _URL = (
     "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a"
@@ -37,9 +37,14 @@ def test_rejection_is_claudes_line_or_empty():
     assert _rejection_line("") == ""
 
 
+def test_logout_argv():
+    assert _logout_argv(r"C:\claude.exe") == [r"C:\claude.exe", "auth", "logout"]
+
+
 if __name__ == "__main__":
     test_url_is_clean_of_ansi()
     test_code_hash_state_is_a_code()
     test_words_and_sentences_are_not_codes()
     test_rejection_is_claudes_line_or_empty()
+    test_logout_argv()
     print("ok")

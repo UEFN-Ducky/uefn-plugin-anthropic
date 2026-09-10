@@ -71,6 +71,42 @@ def is_claude_logged_in(cli_path: str = "") -> bool:
     return bool(claude_auth_status(cli_path).get("loggedIn"))
 
 
+def _logout_argv(binary: str) -> list[str]:
+    return [binary, "auth", "logout"]
+
+
+def claude_logout(cli_path: str = "") -> dict[str, Any]:
+    """Sign out of the Claude Code CLI so Settings can re-run the login flow."""
+    binary = resolve_claude_bin(cli_path)
+    if not binary:
+        return {"ok": False, "error": "claude CLI not found"}
+    try:
+        from frontend.ui_web.terminal.path_env import env_with_fresh_path
+
+        env = env_with_fresh_path()
+        kwargs: dict[str, Any] = {
+            "capture_output": True,
+            "text": True,
+            "timeout": 20,
+            "env": env,
+            "input": "y\n",
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.run(_logout_argv(binary), **kwargs)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    try:
+        if _PENDING_PATH.is_file():
+            _PENDING_PATH.unlink()
+    except OSError:
+        pass
+    if is_claude_logged_in(cli_path):
+        err = ((proc.stderr or proc.stdout or "logout did not take effect").strip())[:300]
+        return {"ok": False, "logged_in": True, "error": err}
+    return {"ok": True, "logged_in": False, "message": "Logged out of Claude Code."}
+
+
 def extract_auth_url(text: str) -> str:
     # Terminal output wraps the URL in an OSC-8 hyperlink + color codes; strip
     # them first or the escape bytes end up inside the URL we open.
