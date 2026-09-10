@@ -99,6 +99,7 @@ def test_spawn_login_uses_visible_claude_command():
     out = spawn_login_session(New(), ".", "__settings__", r"C:\claude.exe")
     assert out["hidden"] is False
     assert out["push_open"] is True
+    assert out["activate"] is False
     assert out["title"] == "Claude Login"
     assert out["command"] == [r"C:\claude.exe", "auth", "login"]
     assert out["env_extra"]["BROWSER"] == LOGIN_NO_BROWSER

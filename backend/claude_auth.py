@@ -285,7 +285,7 @@ def _kill_login_session(session_id: str) -> None:
 
 
 def spawn_login_session(mgr: Any, workdir: str, conv_id: str, binary: str = "") -> dict[str, Any]:
-    """Visible Claude Login tab. Prefer spawning claude.exe directly (no PowerShell)."""
+    """Listed Claude Login session. Do not focus the editor tab (that kills the popup)."""
     common: dict[str, Any] = {
         "cwd": workdir,
         "title": "Claude Login",
@@ -300,10 +300,21 @@ def spawn_login_session(mgr: Any, workdir: str, conv_id: str, binary: str = "") 
                 **common,
                 command=[binary, "auth", "login"],
                 env_extra=extra,
+                activate=False,
             )
         except TypeError:
-            pass
-    spawn = mgr.spawn(shell="powershell", **common)
+            try:
+                return mgr.spawn(
+                    **common,
+                    command=[binary, "auth", "login"],
+                    env_extra=extra,
+                )
+            except TypeError:
+                pass
+    try:
+        spawn = mgr.spawn(shell="powershell", **common, activate=False)
+    except TypeError:
+        spawn = mgr.spawn(shell="powershell", **common)
     session_id = str(spawn.get("session_id") or spawn.get("id") or "").strip()
     session = mgr.get_session(session_id) if spawn.get("ok") and session_id else None
     if session is not None and binary:
