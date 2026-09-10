@@ -131,7 +131,9 @@ def _before_launch(
 
     pending = get_pending_auth(conv.id)
     if pending:
-        outcome = continue_claude_login(conv_id=conv.id, user_text=user_text, cli_path=cli_path)
+        outcome = continue_claude_login(
+            conv_id=conv.id, user_text=user_text, cli_path=cli_path, push=push
+        )
         if outcome.get("restart"):
             clear_pending_auth(conv.id)
             deferred = str(outcome.get("deferred_prompt") or user_text)
@@ -142,10 +144,12 @@ def _before_launch(
                 deferred_prompt=deferred,
                 push=push,
             )
+            why = str(outcome.get("error") or "")
             return emit_assistant(
                 conv,
                 agent_id=agent_id,
-                reply=str(started.get("message") or outcome.get("message") or ""),
+                reply=(f"{why}\n\n" if why else "")
+                + str(started.get("message") or started.get("error") or ""),
                 push=push,
                 run_id=run_id,
                 ok=True,
@@ -160,7 +164,8 @@ def _before_launch(
             reply=str(outcome.get("message") or outcome.get("error") or "Login still pending."),
             push=push,
             run_id=run_id,
-            ok=bool(outcome.get("ok")),
+            # Waiting on the user is not a failed turn — no red "Interrupted" banner.
+            ok=bool(outcome.get("ok") or outcome.get("needs_login")),
             error=str(outcome.get("error") or ""),
             terminal_session_id=str(
                 outcome.get("terminal_session_id") or pending.get("terminal_session_id") or ""
@@ -188,7 +193,7 @@ def _before_launch(
         reply=str(started.get("message") or started.get("error") or "Claude login required."),
         push=push,
         run_id=run_id,
-        ok=bool(started.get("ok")),
+        ok=bool(started.get("ok") or started.get("needs_login")),
         error=str(started.get("error") or ""),
         terminal_session_id=str(started.get("terminal_session_id") or ""),
         status="needs_login"

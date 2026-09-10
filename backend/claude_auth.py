@@ -14,7 +14,12 @@ from typing import Any
 from backend.agent.coding_agents.base import which_cli
 from frontend.settings import default_app_data_dir
 
-_URL_RE = re.compile(r"https://(?:claude\.ai|claude\.com|platform\.claude\.com)[^\s\"'<>]+", re.I)
+_URL_RE = re.compile(
+    r"https://(?:claude\.ai|claude\.com|platform\.claude\.com)[^\s\"'<>\x00-\x1f\x7f]+", re.I
+)
+# CSI (colors/cursor), OSC (hyperlinks: ESC ] 8 ;; url BEL) and stray BEL bytes.
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x07")
+_DONE_WORDS = frozenset({"done", "logged in", "ok", "ready", "continue", "yes", "y"})
 _PENDING_PATH = default_app_data_dir() / "coding_agents" / "auth_pending.json"
 
 
@@ -67,7 +72,9 @@ def is_claude_logged_in(cli_path: str = "") -> bool:
 
 
 def extract_auth_url(text: str) -> str:
-    matches = _URL_RE.findall(text or "")
+    # Terminal output wraps the URL in an OSC-8 hyperlink + color codes; strip
+    # them first or the escape bytes end up inside the URL we open.
+    matches = _URL_RE.findall(_ANSI_RE.sub(" ", text or ""))
     for url in matches:
         if "oauth" in url.lower() or "authorize" in url.lower() or "login" in url.lower():
             return url.rstrip(").,]}")
@@ -117,13 +124,14 @@ def clear_pending_auth(conv_id: str) -> None:
 
 
 def looks_like_auth_code(text: str) -> bool:
-    s = (text or "").strip()
-    if not s or "\n" in s or " " in s:
+    """One pasted token, not a sentence. Claude's code is `code#state` — keep `#`
+    and any other URL-ish punctuation; only whitespace disqualifies."""
+    s = (text or "").strip().strip("`")
+    if not s or any(ch.isspace() for ch in s):
         return False
-    if s.lower() in ("done", "logged in", "ok", "ready", "continue"):
+    if s.lower() in _DONE_WORDS:
         return False
-    # OAuth codes are typically long tokens
-    return 8 <= len(s) <= 512 and re.fullmatch(r"[A-Za-z0-9._\-+/=]+", s) is not None
+    return 8 <= len(s) <= 2048
 
 
 def start_claude_login(
@@ -160,6 +168,7 @@ def start_claude_login(
     session = mgr.get_session(session_id)
     if session is None:
         return {"ok": False, "error": "terminal session disappeared"}
+    _push_terminal_open(push, session, conv_id)
 
     if os.name == "nt":
         cmd = f"& {_ps_quote(binary)} auth login"
@@ -247,11 +256,45 @@ def _ps_quote(path: str) -> str:
     return "'" + path.replace("'", "''") + "'"
 
 
+_REJECT_WORDS = ("invalid", "expired", "incorrect", "failed", "error", "denied")
+
+
+def _rejection_line(new_output: str) -> str:
+    """Claude's own complaint about the pasted code, or '' while it is still working."""
+    for line in reversed(_ANSI_RE.sub(" ", new_output or "").splitlines()):
+        s = line.strip()
+        if s and any(w in s.lower() for w in _REJECT_WORDS):
+            return s[:200]
+    return ""
+
+
+def _push_terminal_open(push: Any, session: Any, conv_id: str) -> None:
+    """Open/raise the login tab via the run's own push. The manager's push hook
+    is only wired once by the panel window; the run push always reaches the chat."""
+    if not push:
+        return
+    try:
+        push(
+            {
+                "type": "terminal_open",
+                "session_id": session.id,
+                "shell": session.shell,
+                "title": session.title,
+                "cwd": session.cwd,
+                "ws_url": session.ws_url,
+                "conv_id": conv_id,
+            }
+        )
+    except Exception:
+        pass
+
+
 def continue_claude_login(
     *,
     conv_id: str,
     user_text: str,
     cli_path: str,
+    push: Any = None,
 ) -> dict[str, Any]:
     """Handle the user's follow-up (auth code or 'done') during pending login."""
     pending = get_pending_auth(conv_id)
@@ -263,9 +306,10 @@ def continue_claude_login(
         clear_pending_auth(conv_id)
         return {"ok": True, "logged_in": True, "deferred_prompt": deferred, "message": "Login complete."}
 
-    text = (user_text or "").strip()
+    text = (user_text or "").strip().strip("`")
     session_id = str(pending.get("terminal_session_id") or "")
     low = text.lower()
+    url = str(pending.get("auth_url") or "")
 
     if looks_like_auth_code(text) and session_id:
         from frontend.ui_web.terminal import get_terminal_manager
@@ -279,11 +323,13 @@ def continue_claude_login(
                 "restart": True,
                 "deferred_prompt": str(pending.get("deferred_prompt") or ""),
             }
+        _push_terminal_open(push, session, conv_id)
         try:
             session.write(text + "\r\n")
         except Exception as exc:
             return {"ok": False, "error": f"Could not send code to terminal: {exc}"}
 
+        before = len(session.read_output_tail(60000))
         deadline = time.time() + 45.0
         while time.time() < deadline:
             time.sleep(0.5)
@@ -296,18 +342,27 @@ def continue_claude_login(
                     "deferred_prompt": deferred,
                     "message": "Login complete — running your original request…",
                 }
+            rejected = _rejection_line(session.read_output_tail(60000)[before:])
+            if rejected:
+                # A rejected OAuth code is single-use — only a fresh URL can recover.
+                return {
+                    "ok": False,
+                    "restart": True,
+                    "deferred_prompt": str(pending.get("deferred_prompt") or ""),
+                    "error": f"Claude rejected that code: {rejected}",
+                }
         return {
-            "ok": False,
+            "ok": True,
             "needs_login": True,
             "message": (
-                "Code sent, but Claude is not logged in yet. "
-                "Finish in the browser, then reply `done`, or paste a new code."
+                "Code sent — Claude is still finishing sign-in. "
+                "Reply `done` in a moment and I'll run your request."
             ),
-            "auth_url": str(pending.get("auth_url") or ""),
+            "auth_url": url,
             "terminal_session_id": session_id,
         }
 
-    if low in ("done", "logged in", "ok", "ready", "continue"):
+    if low in _DONE_WORDS:
         if is_claude_logged_in(cli_path):
             deferred = str(pending.get("deferred_prompt") or "")
             clear_pending_auth(conv_id)
@@ -317,23 +372,21 @@ def continue_claude_login(
                 "deferred_prompt": deferred,
                 "message": "Login complete — running your original request…",
             }
-        url = str(pending.get("auth_url") or "")
         return {
-            "ok": False,
+            "ok": True,
             "needs_login": True,
             "message": (
                 "Still not logged in. Open the URL in Chrome, finish authorize, "
                 "then reply `done` again — or paste the auth code here.\n\n"
-                + (url if url else "")
+                + url
             ),
             "auth_url": url,
             "terminal_session_id": session_id,
         }
 
     # Any other message while pending: remind
-    url = str(pending.get("auth_url") or "")
     return {
-        "ok": False,
+        "ok": True,
         "needs_login": True,
         "message": (
             "Claude login is still pending.\n\n"
