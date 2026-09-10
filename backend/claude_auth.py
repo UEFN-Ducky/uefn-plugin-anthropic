@@ -33,10 +33,21 @@ def _default_claude_bin() -> str:
     return ""
 
 
+def _prefer_native_bin(path: str) -> str:
+    """Prefer claude.exe over .cmd/.ps1 so login stdin is not a PowerShell prompt."""
+    p = Path(path)
+    if p.suffix.lower() not in {".cmd", ".bat", ".ps1"}:
+        return path
+    for cand in (p.with_suffix(".exe"), p.parent / "claude.exe", Path.home() / ".local" / "bin" / "claude.exe"):
+        if cand.is_file():
+            return str(cand.resolve())
+    return path
+
+
 def resolve_claude_bin(override: str = "") -> str:
     found = which_cli("claude", override)
     if found:
-        return found
+        return _prefer_native_bin(found)
     return _default_claude_bin()
 
 
@@ -227,6 +238,14 @@ def prompt_claude_login_in_settings(
     }
 
 
+LOGIN_NO_BROWSER = "ducky-do-not-open-browser"
+
+
+def _login_env_extra() -> dict[str, str]:
+    """Claude must not auto-open a browser — the modal link is the only open."""
+    return {"BROWSER": LOGIN_NO_BROWSER}
+
+
 def _pending_session(conv_id: str) -> tuple[dict[str, Any] | None, Any]:
     """Return (pending row, live terminal session or None)."""
     pending = get_pending_auth(conv_id)
@@ -260,25 +279,39 @@ def _kill_login_session(session_id: str) -> None:
     try:
         from frontend.ui_web.terminal import get_terminal_manager
 
-        get_terminal_manager().kill(sid, push_close=False)
+        get_terminal_manager().kill(sid, push_close=True)
     except Exception:
         pass
 
 
-def spawn_login_session(mgr: Any, workdir: str, conv_id: str) -> dict[str, Any]:
-    """Start a login PTY. Hidden (no tab) on Ducky 1.1.100+; older builds open a tab."""
-    common = {
-        "shell": "powershell",
+def spawn_login_session(mgr: Any, workdir: str, conv_id: str, binary: str = "") -> dict[str, Any]:
+    """Visible Claude Login tab. Prefer spawning claude.exe directly (no PowerShell)."""
+    common: dict[str, Any] = {
         "cwd": workdir,
         "title": "Claude Login",
-        "push_open": False,
+        "push_open": True,
+        "hidden": False,
         "conv_id": conv_id,
     }
-    try:
-        return mgr.spawn(**common, hidden=True)
-    except TypeError:
-        common["push_open"] = True
-        return mgr.spawn(**common)
+    extra = _login_env_extra()
+    if binary:
+        try:
+            return mgr.spawn(
+                **common,
+                command=[binary, "auth", "login"],
+                env_extra=extra,
+            )
+        except TypeError:
+            pass
+    spawn = mgr.spawn(shell="powershell", **common)
+    session_id = str(spawn.get("session_id") or spawn.get("id") or "").strip()
+    session = mgr.get_session(session_id) if spawn.get("ok") and session_id else None
+    if session is not None and binary:
+        if os.name == "nt":
+            session.run_command(f"& {_ps_quote(binary)} auth login", background=True)
+        else:
+            session.run_command(f"{binary} auth login", background=True)
+    return spawn
 
 
 def start_claude_login(
@@ -289,35 +322,22 @@ def start_claude_login(
     deferred_prompt: str,
     push: Any,
 ) -> dict[str, Any]:
-    """Start `claude auth login` in a hidden terminal. The Settings modal
-    shows the URL and submits the code via submit_claude_login_code."""
+    """Start `claude auth login` as a listed terminal tab. User clicks the URL."""
     from frontend.ui_web.terminal import get_terminal_manager
 
     _ = push
+    old = get_pending_auth(conv_id) or {}
+    _kill_login_session(str(old.get("terminal_session_id") or ""))
 
-    pending, session = _pending_session(conv_id)
-    if session is not None:
-        url = _url_from_session(session, pending)
-        if url and pending and url != pending.get("auth_url"):
-            pending = {**pending, "auth_url": url}
-            set_pending_auth(conv_id, pending)
-        return {
-            "ok": True,
-            "needs_login": True,
-            "logged_in": False,
-            "login_ui": "code_modal",
-            "auth_url": url,
-            "terminal_session_id": str((pending or {}).get("terminal_session_id") or session.id),
-            "message": "Open the sign-in link, then paste the code in the box.",
-        }
-
-    binary = resolve_claude_bin(cli_path) or "claude"
+    binary = resolve_claude_bin(cli_path)
+    if not binary:
+        return {"ok": False, "error": "claude CLI not found"}
     mgr = get_terminal_manager()
     workdir = (cwd or "").strip() or os.getcwd()
     if not os.path.isdir(workdir):
         workdir = os.getcwd()
 
-    spawn = spawn_login_session(mgr, workdir, conv_id)
+    spawn = spawn_login_session(mgr, workdir, conv_id, binary)
     if not spawn.get("ok"):
         return {"ok": False, "error": str(spawn.get("error") or "failed to start login")}
 
@@ -328,13 +348,6 @@ def start_claude_login(
     session = mgr.get_session(session_id)
     if session is None:
         return {"ok": False, "error": "login session disappeared"}
-
-    if os.name == "nt":
-        cmd = f"& {_ps_quote(binary)} auth login"
-    else:
-        cmd = f"{binary} auth login"
-
-    session.run_command(cmd, background=True)
 
     url = ""
     deadline = time.time() + _URL_WAIT_S
@@ -359,12 +372,12 @@ def start_claude_login(
         "login_ui": "code_modal",
         "auth_url": url,
         "terminal_session_id": session_id,
-        "message": "Open the sign-in link, then paste the code in the box.",
+        "message": "Click the sign-in link, then paste the code in the box.",
     }
 
 
 def claude_login_status(*, cli_path: str = "", conv_id: str = SETTINGS_CONV) -> dict[str, Any]:
-    """Refresh the sign-in URL from the hidden CLI; report logged_in when done."""
+    """Refresh the sign-in URL from the login tab; report logged_in when done."""
     pending, session = _pending_session(conv_id)
     if session is not None and tail_says_logged_in(session.read_output_tail(16000)):
         if is_claude_logged_in(cli_path):
@@ -392,7 +405,7 @@ def submit_claude_login_code(
     cli_path: str = "",
     conv_id: str = SETTINGS_CONV,
 ) -> dict[str, Any]:
-    """Write the OAuth code into the hidden `claude auth login` process."""
+    """Write the OAuth code into the listed `claude auth login` tab, then close it."""
     text = (code or "").strip().strip("`")
     if not looks_like_auth_code(text):
         return {"ok": False, "error": "That doesn't look like a login code."}
@@ -401,15 +414,14 @@ def submit_claude_login_code(
     if session is None:
         return {"ok": False, "error": "Login isn't waiting for a code yet. Press Log in again."}
 
-    before = session.read_output_tail(8000)
+    offset = len(session.read_output_tail(16000))
     session.write(text + "\r\n")
     deadline = time.time() + 25.0
     next_cli = time.time() + 2.0
     while time.time() < deadline:
         time.sleep(0.35)
         tail = session.read_output_tail(16000)
-        new = tail[len(before) :] if tail.startswith(before) else tail
-        reject = _rejection_line(new)
+        reject = _rejection_line(tail[offset:])
         if reject:
             return {"ok": False, "logged_in": False, "error": reject}
         if tail_says_logged_in(tail) or time.time() >= next_cli:
@@ -426,18 +438,32 @@ def submit_claude_login_code(
     }
 
 
+def cancel_claude_login(*, conv_id: str = SETTINGS_CONV, **_kw: Any) -> dict[str, Any]:
+    """Close the Claude Login tab — cancel / modal dismiss."""
+    pending = get_pending_auth(conv_id) or {}
+    sid = str(pending.get("terminal_session_id") or "")
+    clear_pending_auth(conv_id)
+    _kill_login_session(sid)
+    return {"ok": True, "cancelled": True}
+
+
 def _ps_quote(path: str) -> str:
     return "'" + path.replace("'", "''") + "'"
 
 
-_REJECT_WORDS = ("invalid", "expired", "incorrect", "failed", "error", "denied")
+_REJECT_WORDS = ("invalid", "expired", "incorrect", "denied")
 
 
 def _rejection_line(new_output: str) -> str:
     """Claude's own complaint about the pasted code, or '' while it is still working."""
     for line in reversed(_ANSI_RE.sub(" ", new_output or "").splitlines()):
         s = line.strip()
-        if s and any(w in s.lower() for w in _REJECT_WORDS):
+        low = s.lower()
+        if "commandnotfound" in low or "fullyqualifiederrorid" in low:
+            continue
+        if "oauth error" in low or "login failed" in low:
+            return s[:200]
+        if s and any(w in low for w in _REJECT_WORDS):
             return s[:200]
     return ""
 

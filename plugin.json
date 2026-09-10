@@ -1,7 +1,7 @@
 {
   "id": "anthropic",
   "kind": "plugin",
-  "version": "1.0.37",
+  "version": "1.0.38",
   "label": "Anthropic",
   "description": "Anthropic API key + Claude Code coding agent for Settings → LLMs. Install from Store → Gateways, then enable to show Anthropic under Providers & Keys and Claude Code under Coding Agents.",
   "min_app_version": "1.1.99",
@@ -115,7 +115,7 @@
         {
           "target": "settings.llms.provider.agent.login",
           "title": "Log in here",
-          "body": "This is the Claude Code login row. Press Log in — a window shows the sign-in link and a box for the code. Never paste a login code in chat. Log out is next to it when you need to switch accounts.",
+          "body": "This is the Claude Code login row. Press Log in — click the sign-in link in the window, then paste the code. A Claude Login tab appears in the terminal list and closes when you cancel or finish. Never paste a login code in chat.",
           "advance": "require_click",
           "mode": "rect"
         },

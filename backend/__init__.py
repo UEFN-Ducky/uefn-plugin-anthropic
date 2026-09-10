@@ -218,7 +218,7 @@ def _on_needs_login(
 
 
 def _login(*, cwd: str = "", cli_path: str = "", push: Any = None, **_kw: Any) -> dict[str, Any]:
-    """Settings → Log in: hidden CLI + modal (URL + code). No terminal tab."""
+    """Settings → Log in: listed terminal tab + modal (clickable URL + code)."""
     from .claude_auth import SETTINGS_CONV, start_claude_login
 
     return start_claude_login(
@@ -240,6 +240,12 @@ def _login_status(*, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
     from .claude_auth import SETTINGS_CONV, claude_login_status
 
     return claude_login_status(cli_path=cli_path, conv_id=SETTINGS_CONV)
+
+
+def _login_cancel(**_kw: Any) -> dict[str, Any]:
+    from .claude_auth import SETTINGS_CONV, cancel_claude_login
+
+    return cancel_claude_login(conv_id=SETTINGS_CONV)
 
 
 def _logout(*, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
@@ -279,6 +285,7 @@ def register(api) -> None:
         login=_login,
         login_submit=_login_submit,
         login_status=_login_status,
+        login_cancel=_login_cancel,
         logout=_logout,
         settings_defaults={
             "enabled": True,
