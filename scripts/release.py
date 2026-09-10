@@ -198,6 +198,10 @@ def main() -> None:
     parser.add_argument("--category", default=os.environ.get("UDS_CATEGORY") or "plugins")
     args = parser.parse_args()
 
+    if args.publish:
+        from commit_before_store import commit_and_push_before_publish
+
+        commit_and_push_before_publish(ROOT, args.changelog)
     zip_path = build_zip()
     if args.publish:
         publish(zip_path, category=args.category, changelog=args.changelog)
