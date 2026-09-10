@@ -9,6 +9,7 @@ from claude_auth import (
     extract_auth_url,
     looks_like_auth_code,
     settings_login_message,
+    spawn_login_session,
     submit_claude_login_code,
     tail_says_logged_in,
 )
@@ -66,6 +67,23 @@ def test_tail_logged_in():
     assert not tail_says_logged_in("Paste code here")
 
 
+def test_spawn_login_skips_hidden_on_old_manager():
+    class Old:
+        def spawn(self, shell, cwd, title, push_open=False, conv_id=""):
+            return {"ok": True, "via": "old"}
+
+    class New:
+        def spawn(self, shell, cwd, title, push_open=False, hidden=False, conv_id=""):
+            return {"ok": True, "via": "new", "hidden": hidden}
+
+    assert spawn_login_session(New(), ".", "__settings__") == {
+        "ok": True,
+        "via": "new",
+        "hidden": True,
+    }
+    assert spawn_login_session(Old(), ".", "__settings__")["via"] == "old"
+
+
 def test_submit_rejects_junk_without_a_session():
     bad = submit_claude_login_code(code="not a code", conv_id="__test_no_session__")
     assert bad["ok"] is False
@@ -85,5 +103,6 @@ if __name__ == "__main__":
     test_logout_argv()
     test_chat_points_at_settings_not_codes()
     test_tail_logged_in()
+    test_spawn_login_skips_hidden_on_old_manager()
     test_submit_rejects_junk_without_a_session()
     print("ok")

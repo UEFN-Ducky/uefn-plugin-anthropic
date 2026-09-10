@@ -265,6 +265,21 @@ def _kill_login_session(session_id: str) -> None:
         pass
 
 
+def spawn_login_session(mgr: Any, workdir: str, conv_id: str) -> dict[str, Any]:
+    """Start a login PTY. `hidden=` is 1.1.100+; older Ducky rejects the kwarg."""
+    common = {
+        "shell": "powershell",
+        "cwd": workdir,
+        "title": "Claude Login",
+        "push_open": False,
+        "conv_id": conv_id,
+    }
+    try:
+        return mgr.spawn(**common, hidden=True)
+    except TypeError:
+        return mgr.spawn(**common)
+
+
 def start_claude_login(
     *,
     conv_id: str,
@@ -301,14 +316,7 @@ def start_claude_login(
     if not os.path.isdir(workdir):
         workdir = os.getcwd()
 
-    spawn = mgr.spawn(
-        shell="powershell",
-        cwd=workdir,
-        title="Claude Login",
-        push_open=False,
-        hidden=True,
-        conv_id=conv_id,
-    )
+    spawn = spawn_login_session(mgr, workdir, conv_id)
     if not spawn.get("ok"):
         return {"ok": False, "error": str(spawn.get("error") or "failed to start login")}
 
