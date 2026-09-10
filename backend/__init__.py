@@ -240,6 +240,20 @@ def _on_needs_login(
     )
 
 
+def _login(*, cwd: str = "", cli_path: str = "", push: Any = None, **_kw: Any) -> dict[str, Any]:
+    """Settings → Coding agent → Log in: same terminal + browser flow as the chat,
+    but with no chat turn. The user finishes in the browser / terminal tab."""
+    from .claude_auth import start_claude_login
+
+    return start_claude_login(
+        conv_id="__settings__",
+        cwd=cwd,
+        cli_path=cli_path,
+        deferred_prompt="",
+        push=push,
+    )
+
+
 def register(api) -> None:
     from .anthropic_provider import AnthropicProvider
     from .claude_code_adapter import ClaudeCodeAdapter
@@ -268,6 +282,7 @@ def register(api) -> None:
         thinking_env=_thinking_env,
         before_launch=_before_launch,
         on_needs_login=_on_needs_login,
+        login=_login,
         settings_defaults={
             "enabled": True,
             "cli_path": "",

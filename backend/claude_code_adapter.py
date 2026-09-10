@@ -805,6 +805,7 @@ class ClaudeCodeAdapter:
         override = str(cfg.get("cli_path") or "")
         path = resolve_claude_bin(override)
         default_args = str(cfg.get("default_args") or "")
+        logged_in: bool | None = None
         if path:
             from .cli_update import read_cli_version, status_text
 
@@ -821,7 +822,7 @@ class ClaudeCodeAdapter:
         else:
             status = _claude_code_missing_status()
             available = False
-        return CodingAgentInfo(
+        info = CodingAgentInfo(
             id=self.id,
             label=self.label,
             enabled=enabled,
@@ -832,6 +833,10 @@ class ClaudeCodeAdapter:
             capabilities=self.capabilities,
             models=claude_code_model_rows(),
         )
+        # Set as an attribute (not a ctor kwarg) so older app builds without the
+        # field still load this plugin; new builds serialize it as `logged_in`.
+        info.logged_in = logged_in  # type: ignore[attr-defined]
+        return info
 
     def launch(
         self,
