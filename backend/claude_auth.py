@@ -266,7 +266,7 @@ def _kill_login_session(session_id: str) -> None:
 
 
 def spawn_login_session(mgr: Any, workdir: str, conv_id: str) -> dict[str, Any]:
-    """Start a login PTY. `hidden=` is 1.1.100+; older Ducky rejects the kwarg."""
+    """Start a login PTY. Hidden (no tab) on Ducky 1.1.100+; older builds open a tab."""
     common = {
         "shell": "powershell",
         "cwd": workdir,
@@ -277,6 +277,7 @@ def spawn_login_session(mgr: Any, workdir: str, conv_id: str) -> dict[str, Any]:
     try:
         return mgr.spawn(**common, hidden=True)
     except TypeError:
+        common["push_open"] = True
         return mgr.spawn(**common)
 
 

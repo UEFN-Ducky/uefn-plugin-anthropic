@@ -70,7 +70,7 @@ def test_tail_logged_in():
 def test_spawn_login_skips_hidden_on_old_manager():
     class Old:
         def spawn(self, shell, cwd, title, push_open=False, conv_id=""):
-            return {"ok": True, "via": "old"}
+            return {"ok": True, "via": "old", "push_open": push_open}
 
     class New:
         def spawn(self, shell, cwd, title, push_open=False, hidden=False, conv_id=""):
@@ -81,7 +81,8 @@ def test_spawn_login_skips_hidden_on_old_manager():
         "via": "new",
         "hidden": True,
     }
-    assert spawn_login_session(Old(), ".", "__settings__")["via"] == "old"
+    old = spawn_login_session(Old(), ".", "__settings__")
+    assert old == {"ok": True, "via": "old", "push_open": True}
 
 
 def test_submit_rejects_junk_without_a_session():
