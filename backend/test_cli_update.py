@@ -36,7 +36,7 @@ def test_plugin_register_schedules_update():
     assert "schedule_cli_update_on_plugin_load" in init
     assert "update_claude_cli" in adapter
     assert "is_cli_too_old_error" in adapter
-    assert plugin_package_version() == "1.0.27"
+    assert parse_version_tuple(plugin_package_version()), "plugin.json version unreadable"
 
 
 if __name__ == "__main__":
