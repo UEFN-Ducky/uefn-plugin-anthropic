@@ -230,10 +230,10 @@ def _login(*, cwd: str = "", cli_path: str = "", push: Any = None, **_kw: Any) -
     )
 
 
-def _login_submit(*, code: str = "", cli_path: str = "", **_kw: Any) -> dict[str, Any]:
+def _login_submit(*, code: str = "", cli_path: str = "", cwd: str = "", **_kw: Any) -> dict[str, Any]:
     from .claude_auth import SETTINGS_CONV, submit_claude_login_code
 
-    return submit_claude_login_code(code=code, cli_path=cli_path, conv_id=SETTINGS_CONV)
+    return submit_claude_login_code(code=code, cli_path=cli_path, cwd=cwd, conv_id=SETTINGS_CONV)
 
 
 def _login_status(*, cli_path: str = "", **_kw: Any) -> dict[str, Any]:

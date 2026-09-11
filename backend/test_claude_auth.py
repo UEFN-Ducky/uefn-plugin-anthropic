@@ -12,6 +12,8 @@ from claude_auth import (
     _rejection_line,
     cancel_claude_login,
     extract_auth_url,
+    _is_current_login_gen,
+    _next_login_gen,
     looks_like_auth_code,
     settings_login_message,
     spawn_login_session,
@@ -132,7 +134,16 @@ def test_submit_rejects_junk_without_a_session():
         conv_id="__test_no_session__",
     )
     assert missing["ok"] is False
-    assert "Press Log in" in str(missing.get("error") or "")
+    err = str(missing.get("error") or "").lower()
+    assert "isn't waiting" not in err
+    assert missing.get("restarted") or "closed" in err or "not found" in err or "restarted" in err
+
+
+def test_latest_login_gen_wins():
+    older = _next_login_gen()
+    newer = _next_login_gen()
+    assert not _is_current_login_gen(older)
+    assert _is_current_login_gen(newer)
 
 
 def test_cancel_without_session_is_ok():
@@ -155,5 +166,6 @@ if __name__ == "__main__":
     test_spawn_login_uses_visible_claude_command()
     test_spawn_login_falls_back_on_old_manager()
     test_submit_rejects_junk_without_a_session()
+    test_latest_login_gen_wins()
     test_cancel_without_session_is_ok()
     print("ok")

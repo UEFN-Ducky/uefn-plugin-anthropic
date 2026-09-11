@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,22 @@ _DONE_WORDS = frozenset({"done", "logged in", "ok", "ready", "continue", "yes", 
 _PENDING_PATH = default_app_data_dir() / "coding_agents" / "auth_pending.json"
 SETTINGS_LOGIN_HREF = "ducky://settings.llms/anthropic#login"
 SETTINGS_CONV = "__settings__"
-_URL_WAIT_S = 3.0
+_URL_WAIT_S = 12.0
+_LOGIN_GEN = 0
+_LOGIN_GEN_LOCK = threading.Lock()
+_SESSION_DEAD = "The login tab closed. Use the new sign-in link, then paste a fresh code."
+
+
+def _next_login_gen() -> int:
+    global _LOGIN_GEN
+    with _LOGIN_GEN_LOCK:
+        _LOGIN_GEN += 1
+        return _LOGIN_GEN
+
+
+def _is_current_login_gen(gen: int) -> bool:
+    with _LOGIN_GEN_LOCK:
+        return gen == _LOGIN_GEN
 
 
 def _default_claude_bin() -> str:
@@ -337,6 +353,7 @@ def start_claude_login(
     from frontend.ui_web.terminal import get_terminal_manager
 
     _ = push
+    gen = _next_login_gen()
     old = get_pending_auth(conv_id) or {}
     _kill_login_session(str(old.get("terminal_session_id") or ""))
 
@@ -364,7 +381,14 @@ def start_claude_login(
     deadline = time.time() + _URL_WAIT_S
     while time.time() < deadline and not url:
         time.sleep(0.25)
+        if not _is_current_login_gen(gen):
+            _kill_login_session(session_id)
+            return {"ok": False, "error": "Login was restarted. Press Log in again."}
         url = extract_auth_url(session.read_output_tail(16000))
+
+    if not _is_current_login_gen(gen):
+        _kill_login_session(session_id)
+        return {"ok": False, "error": "Login was restarted. Press Log in again."}
 
     set_pending_auth(
         conv_id,
@@ -374,6 +398,7 @@ def start_claude_login(
             "auth_url": url,
             "deferred_prompt": deferred_prompt,
             "started": time.time(),
+            "gen": gen,
         },
     )
     return {
@@ -400,10 +425,22 @@ def claude_login_status(*, cli_path: str = "", conv_id: str = SETTINGS_CONV) -> 
     if url and pending and session is not None and url != pending.get("auth_url"):
         pending = {**pending, "auth_url": url}
         set_pending_auth(conv_id, pending)
+    if pending and session is None:
+        return {
+            "ok": True,
+            "logged_in": False,
+            "needs_login": True,
+            "session_alive": False,
+            "login_ui": "code_modal",
+            "auth_url": url,
+            "error": "The login tab closed. Press Log in again.",
+            "terminal_session_id": "",
+        }
     return {
         "ok": True,
         "logged_in": False,
         "needs_login": True,
+        "session_alive": session is not None,
         "login_ui": "code_modal",
         "auth_url": url,
         "terminal_session_id": str((pending or {}).get("terminal_session_id") or ""),
@@ -415,6 +452,8 @@ def submit_claude_login_code(
     code: str,
     cli_path: str = "",
     conv_id: str = SETTINGS_CONV,
+    cwd: str = "",
+    **_kw: Any,
 ) -> dict[str, Any]:
     """Write the OAuth code into the listed `claude auth login` tab, then close it."""
     text = (code or "").strip().strip("`")
@@ -423,7 +462,21 @@ def submit_claude_login_code(
 
     pending, session = _pending_session(conv_id)
     if session is None:
-        return {"ok": False, "error": "Login isn't waiting for a code yet. Press Log in again."}
+        if not pending:
+            return {"ok": False, "error": _SESSION_DEAD}
+        started = start_claude_login(
+            conv_id=conv_id,
+            cwd=cwd,
+            cli_path=cli_path,
+            deferred_prompt="",
+            push=None,
+        )
+        return {
+            "ok": False,
+            "restarted": True,
+            "auth_url": str(started.get("auth_url") or ""),
+            "error": str(started.get("error") or _SESSION_DEAD),
+        }
 
     offset = len(session.read_output_tail(16000))
     session.write(text + "\r\n")
