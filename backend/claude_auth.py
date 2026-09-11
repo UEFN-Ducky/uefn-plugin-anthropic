@@ -24,6 +24,9 @@ _PENDING_PATH = default_app_data_dir() / "coding_agents" / "auth_pending.json"
 SETTINGS_LOGIN_HREF = "ducky://settings.llms/anthropic#login"
 SETTINGS_CONV = "__settings__"
 _URL_WAIT_S = 12.0
+_LINK_GIVE_UP_S = 30.0
+_NO_LINK = "Claude never printed a sign-in link. Check the Claude Login tab, then press Log in again."
+_TAB_CLOSED_NO_LINK = "Claude Login closed before a sign-in link appeared. Press Log in again."
 _LOGIN_GEN = 0
 _LOGIN_GEN_LOCK = threading.Lock()
 _SESSION_DEAD = "The login tab closed. Use the new sign-in link, then paste a fresh code."
@@ -149,6 +152,25 @@ def extract_auth_url(text: str) -> str:
 def tail_says_logged_in(text: str) -> bool:
     s = _ANSI_RE.sub(" ", text or "").lower()
     return "logged in" in s and "not logged" not in s
+
+
+def login_link_error(tail: str, *, alive: bool) -> str:
+    """Error when the OAuth URL never appeared, or '' while we should keep waiting."""
+    text = _ANSI_RE.sub(" ", tail or "")
+    low = text.lower()
+    if "git bash not found" in low:
+        return "Could not start the login terminal. Press Log in again — Ducky will use PowerShell."
+    if "is not recognized" in low or "command not found" in low or "term '" in low:
+        return "Claude Code CLI did not start. Press Detect on the Claude Code row, then Log in again."
+    for line in reversed(text.splitlines()):
+        s = line.strip()
+        if not s:
+            continue
+        if s.lower().startswith("error:") or "oauth error" in s.lower() or "login failed" in s.lower():
+            return s[:200]
+    if not alive:
+        return _TAB_CLOSED_NO_LINK
+    return ""
 
 
 def _load_pending() -> dict[str, Any]:
@@ -310,27 +332,35 @@ def spawn_login_session(mgr: Any, workdir: str, conv_id: str, binary: str = "") 
         "conv_id": conv_id,
     }
     extra = _login_env_extra()
+    # Windows machines often have no Git Bash — never leave spawn on the bash default.
+    login_shell = "powershell" if os.name == "nt" else "bash"
     if binary:
         try:
-            return mgr.spawn(
+            spawn = mgr.spawn(
                 **common,
                 command=[binary, "auth", "login"],
                 env_extra=extra,
                 activate=False,
+                shell=login_shell,
             )
+            if spawn.get("ok"):
+                return spawn
         except TypeError:
             try:
-                return mgr.spawn(
+                spawn = mgr.spawn(
                     **common,
                     command=[binary, "auth", "login"],
                     env_extra=extra,
+                    shell=login_shell,
                 )
+                if spawn.get("ok"):
+                    return spawn
             except TypeError:
                 pass
     try:
-        spawn = mgr.spawn(shell="powershell", **common, activate=False)
+        spawn = mgr.spawn(shell=login_shell, **common, activate=False)
     except TypeError:
-        spawn = mgr.spawn(shell="powershell", **common)
+        spawn = mgr.spawn(shell=login_shell, **common)
     session_id = str(spawn.get("session_id") or spawn.get("id") or "").strip()
     session = mgr.get_session(session_id) if spawn.get("ok") and session_id else None
     if session is not None and binary:
@@ -390,6 +420,18 @@ def start_claude_login(
         _kill_login_session(session_id)
         return {"ok": False, "error": "Login was restarted. Press Log in again."}
 
+    if not url:
+        tail = session.read_output_tail(16000)
+        alive = True
+        try:
+            alive = bool(session.is_alive())
+        except Exception:
+            alive = False
+        err = login_link_error(tail, alive=alive)
+        if err or not alive:
+            _kill_login_session(session_id)
+            return {"ok": False, "error": err or _TAB_CLOSED_NO_LINK}
+
     set_pending_auth(
         conv_id,
         {
@@ -436,6 +478,13 @@ def claude_login_status(*, cli_path: str = "", conv_id: str = SETTINGS_CONV) -> 
             "error": "The login tab closed. Press Log in again.",
             "terminal_session_id": "",
         }
+    link_error = ""
+    if pending and session is not None and not url:
+        tail = session.read_output_tail(16000)
+        link_error = login_link_error(tail, alive=True)
+        age = time.time() - float(pending.get("started") or 0)
+        if not link_error and age >= _LINK_GIVE_UP_S:
+            link_error = _NO_LINK
     return {
         "ok": True,
         "logged_in": False,
@@ -443,6 +492,7 @@ def claude_login_status(*, cli_path: str = "", conv_id: str = SETTINGS_CONV) -> 
         "session_alive": session is not None,
         "login_ui": "code_modal",
         "auth_url": url,
+        "error": link_error,
         "terminal_session_id": str((pending or {}).get("terminal_session_id") or ""),
     }
 

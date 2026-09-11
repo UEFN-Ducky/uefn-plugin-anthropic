@@ -12,8 +12,11 @@ from claude_auth import (
     _rejection_line,
     cancel_claude_login,
     extract_auth_url,
+    login_link_error,
     _is_current_login_gen,
     _next_login_gen,
+    _NO_LINK,
+    _TAB_CLOSED_NO_LINK,
     looks_like_auth_code,
     settings_login_message,
     spawn_login_session,
@@ -104,7 +107,38 @@ def test_spawn_login_uses_visible_claude_command():
     assert out["activate"] is False
     assert out["title"] == "Claude Login"
     assert out["command"] == [r"C:\claude.exe", "auth", "login"]
+    assert out["shell"] == "powershell"
     assert out["env_extra"]["BROWSER"] == LOGIN_NO_BROWSER
+
+
+def test_spawn_login_falls_through_when_command_spawn_fails():
+    class FailCmd:
+        def spawn(self, **kw):
+            if kw.get("command"):
+                return {"ok": False, "error": "Git Bash not found. Install Git for Windows."}
+            return {"ok": True, "via": "ps", "session_id": "s1", **kw}
+
+        def get_session(self, _sid):
+            class Sess:
+                def run_command(self, command, background=False):
+                    self.command = command
+                    self.background = background
+
+            return Sess()
+
+    out = spawn_login_session(FailCmd(), ".", "__settings__", r"C:\claude.exe")
+    assert out["ok"] is True
+    assert out["via"] == "ps"
+    assert out["shell"] == "powershell"
+
+
+def test_login_link_error_is_hard_fail_or_empty():
+    assert "PowerShell" in login_link_error("Git Bash not found. Install Git for Windows.", alive=False)
+    assert "Detect" in login_link_error("claude : The term 'claude' is not recognized", alive=True)
+    assert login_link_error("Error: login failed", alive=True) == "Error: login failed"
+    assert login_link_error("", alive=False) == _TAB_CLOSED_NO_LINK
+    assert login_link_error("", alive=True) == ""
+    assert _NO_LINK
 
 
 def test_spawn_login_falls_back_on_old_manager():
@@ -164,6 +198,8 @@ if __name__ == "__main__":
     test_chat_points_at_settings_not_codes()
     test_tail_logged_in()
     test_spawn_login_uses_visible_claude_command()
+    test_spawn_login_falls_through_when_command_spawn_fails()
+    test_login_link_error_is_hard_fail_or_empty()
     test_spawn_login_falls_back_on_old_manager()
     test_submit_rejects_junk_without_a_session()
     test_latest_login_gen_wins()
