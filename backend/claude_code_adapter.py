@@ -39,10 +39,13 @@ _FAMILY_ORDER = ("opus", "sonnet", "haiku", "fable")
 _MODELS_TTL_S = 3600.0
 _CACHE_SOURCE = "live"
 
+_MODELS_RETRY_S = 60.0
+
 _models_lock = threading.Lock()
 _models_cache: list[dict[str, str]] | None = None
 _models_cache_at = 0.0
 _models_refreshing = False
+_models_attempt_at = 0.0
 
 
 def _family_of(model_id: str) -> str:
@@ -194,12 +197,21 @@ def _write_models_disk_cache(models: list[dict[str, str]]) -> None:
 
 
 def _refresh_models_async() -> None:
-    """Refresh concrete model list off the hot detect() path (single flight)."""
-    global _models_refreshing
+    """Refresh concrete model list off the hot detect() path (single flight).
+
+    A refresh only marks the cache fresh when it actually returns rows, so while
+    the catalog fetch is failing the cache stays stale and every caller asks for
+    another one. Single-flight stops those overlapping but not repeating, so a
+    failing fetch would run back-to-back for as long as the app was open. Record
+    the attempt as well as the success and wait _MODELS_RETRY_S between tries.
+    """
+    global _models_refreshing, _models_attempt_at
+    now = time.time()
     with _models_lock:
-        if _models_refreshing:
+        if _models_refreshing or (now - _models_attempt_at) < _MODELS_RETRY_S:
             return
         _models_refreshing = True
+        _models_attempt_at = now
 
     def _worker() -> None:
         global _models_cache, _models_cache_at, _models_refreshing
