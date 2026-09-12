@@ -164,6 +164,16 @@ def _anthropic_supports_tools(caps: dict[str, Any]) -> bool:
     return True
 
 
+def anthropic_supports_thinking(model_id: str) -> bool:
+    """Claude 3.7+ / 4.x / 5.x. Legacy claude-3-* (except 3.7) cannot take budget_tokens."""
+    mid = (model_id or "").strip().lower()
+    if "claude-3-7" in mid or "claude-3.7" in mid:
+        return True
+    if re.search(r"claude-3(?:-|$|[.])", mid) and "3-7" not in mid and "3.7" not in mid:
+        return False
+    return "claude" in mid
+
+
 def _anthropic_info_from_item(
     item: dict[str, Any],
     pricing_catalog: dict[str, _PricingRow] | None = None,
@@ -192,6 +202,7 @@ def _anthropic_info_from_item(
         price_in=price_in,
         price_out=price_out,
         price_cached_in=cached,
+        supports_thinking_effort=anthropic_supports_thinking(mid),
     )
 
 

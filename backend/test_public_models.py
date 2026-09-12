@@ -1,6 +1,20 @@
 from __future__ import annotations
 
-from model_fetch import canonical_model_id, parse_active_model_ids
+import sys
+from pathlib import Path
+
+_here = Path(__file__).resolve().parent
+for k in list(sys.modules):
+    if k == "backend" or k.startswith("backend."):
+        del sys.modules[k]
+for p in _here.parents:
+    cand = p / "UEFN-Ducky-Release" / "ducky_app"
+    if (cand / "backend" / "agent").is_dir():
+        sys.path.insert(0, str(_here))
+        sys.path.insert(0, str(cand))
+        break
+
+from model_fetch import anthropic_supports_thinking, canonical_model_id, parse_active_model_ids
 
 _HTML = """
 <table><tbody>
@@ -19,3 +33,10 @@ def test_parse_skips_retired_and_strips_date():
 def test_canonical_drops_snapshot_date():
     assert canonical_model_id("claude-opus-4-5-20251101") == "claude-opus-4-5"
     assert canonical_model_id("claude-fable-5-1") == "claude-fable-5-1"
+
+
+def test_thinking_flag():
+    assert anthropic_supports_thinking("claude-sonnet-4-5")
+    assert anthropic_supports_thinking("claude-3-7-sonnet-latest")
+    assert not anthropic_supports_thinking("claude-3-5-sonnet-latest")
+    assert not anthropic_supports_thinking("claude-3-opus-20240229")
