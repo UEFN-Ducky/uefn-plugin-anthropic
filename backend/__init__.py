@@ -254,6 +254,18 @@ def _logout(*, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
     return claude_logout(cli_path)
 
 
+def _cache_ttl_s() -> int:
+    """Prefix-cache TTL: 1h when Settings → extendedCacheTtl is on (plugin default)."""
+    try:
+        from frontend.ui_web.plugin_host_api import prefs_plugin_get
+
+        if prefs_plugin_get("anthropic").get("extendedCacheTtl") is False:
+            return 300
+    except Exception:
+        pass
+    return 3600
+
+
 def register(api) -> None:
     from .anthropic_provider import AnthropicProvider
     from .claude_code_adapter import ClaudeCodeAdapter
@@ -268,6 +280,7 @@ def register(api) -> None:
         tool_schema="anthropic",
         clear_model_cache=clear_model_cache,
         cache_mode="cached",
+        cache_ttl_s=_cache_ttl_s,
         cost_mode="inclusive_input",
         shows_thinking_effort=True,
     )
