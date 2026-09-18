@@ -6,6 +6,7 @@ import html
 import logging
 import re
 import time
+from dataclasses import fields
 from typing import Any
 
 from backend.agent.model_fetch import (
@@ -22,6 +23,12 @@ from backend.agent.model_fetch import (
 _log = logging.getLogger(__name__)
 _CACHE_MAX = 512
 _CACHE_TTL_S = 6 * 3600.0
+_MODEL_INFO_FIELDS = {f.name for f in fields(ModelInfo)}
+
+
+def _model_info(**kw: Any) -> ModelInfo:
+    """Drop unknown fields so an older host ModelInfo does not TypeError."""
+    return ModelInfo(**{k: v for k, v in kw.items() if k in _MODEL_INFO_FIELDS})
 
 
 _ANTHROPIC_PRICING_URL = "https://platform.claude.com/docs/en/about-claude/pricing"
@@ -164,6 +171,29 @@ def _anthropic_supports_tools(caps: dict[str, Any]) -> bool:
     return True
 
 
+def anthropic_thinking_menu(model_id: str) -> dict | None:
+    if not anthropic_supports_thinking(model_id):
+        return None
+    try:
+        from .anthropic_provider import BUDGET
+    except ImportError:
+        from anthropic_provider import BUDGET
+
+    levels = [
+        {"id": "off", "label": "Off", "thinking_tokens": 0, "hint": "No extended thinking"},
+    ]
+    for lid, tokens in (("low", BUDGET["low"]), ("medium", BUDGET["medium"]), ("high", BUDGET["high"])):
+        levels.append(
+            {
+                "id": lid,
+                "label": "Med" if lid == "medium" else lid.title(),
+                "thinking_tokens": tokens,
+                "hint": f"{tokens} thinking tokens",
+            }
+        )
+    return {"lo": "Faster", "hi": "Smarter", "levels": levels}
+
+
 def anthropic_supports_thinking(model_id: str) -> bool:
     """Claude 3.7+ / 4.x / 5.x. Legacy claude-3-* (except 3.7) cannot take budget_tokens."""
     mid = (model_id or "").strip().lower()
@@ -193,7 +223,7 @@ def _anthropic_info_from_item(
         (price_in, price_out, cached, None),
         _resolve_anthropic_price(pricing_catalog or {}, mid, display_name),
     )
-    return ModelInfo(
+    return _model_info(
         id=mid,
         display_name=display_name,
         supports_vision=vision,
@@ -203,6 +233,7 @@ def _anthropic_info_from_item(
         price_out=price_out,
         price_cached_in=cached,
         supports_thinking_effort=anthropic_supports_thinking(mid),
+        thinking_menu=anthropic_thinking_menu(mid),
     )
 
 

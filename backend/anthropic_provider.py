@@ -18,10 +18,11 @@ from backend.agent.providers.cache_utils import (
     anthropic_tools_with_cache,
     parse_anthropic_usage,
 )
-from backend.agent.thinking_effort import EFFORT_BUDGET, normalize_thinking_effort
+from backend.agent.thinking_effort import normalize_thinking_effort
 
-# Back-compat alias for callers that still expect the private name.
-_EFFORT_BUDGET = EFFORT_BUDGET
+# Exact budget_tokens this plugin sends. Host does not own these numbers.
+BUDGET = {"low": 2048, "medium": 8192, "high": 16384}
+_EFFORT_BUDGET = BUDGET
 
 
 class AnthropicProvider:

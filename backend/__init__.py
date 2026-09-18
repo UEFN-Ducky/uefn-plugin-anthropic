@@ -99,9 +99,10 @@ def _complete_one_shot(*, model: str, system: str, user: str) -> str:
 
 
 def _thinking_env(thinking_effort: str) -> dict[str, str]:
-    from backend.agent.thinking_effort import EFFORT_BUDGET, normalize_thinking_effort
+    from backend.agent.thinking_effort import normalize_thinking_effort
+    from .anthropic_provider import BUDGET
 
-    budget = EFFORT_BUDGET.get(normalize_thinking_effort(thinking_effort), 0)
+    budget = BUDGET.get(normalize_thinking_effort(thinking_effort), 0)
     return {"MAX_THINKING_TOKENS": str(budget)} if budget > 0 else {}
 
 

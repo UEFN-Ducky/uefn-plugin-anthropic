@@ -14,7 +14,7 @@ for p in _here.parents:
         sys.path.insert(0, str(cand))
         break
 
-from model_fetch import anthropic_supports_thinking, canonical_model_id, parse_active_model_ids
+from model_fetch import anthropic_supports_thinking, anthropic_thinking_menu, canonical_model_id, parse_active_model_ids
 
 _HTML = """
 <table><tbody>
@@ -40,3 +40,7 @@ def test_thinking_flag():
     assert anthropic_supports_thinking("claude-3-7-sonnet-latest")
     assert not anthropic_supports_thinking("claude-3-5-sonnet-latest")
     assert not anthropic_supports_thinking("claude-3-opus-20240229")
+    menu = anthropic_thinking_menu("claude-sonnet-4-5")
+    assert menu and menu["levels"][0]["id"] == "off"
+    assert menu["levels"][1]["thinking_tokens"] == 2048
+    assert anthropic_thinking_menu("claude-3-5-sonnet-latest") is None
