@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+_LAST_WINDOWS: list[dict[str, Any]] = []
 _PAIRS = (
     (
         "anthropic-ratelimit-requests-remaining",
@@ -302,6 +303,16 @@ def _refresh_claude_oauth(oauth: dict[str, Any]) -> dict[str, Any] | None:
     return out
 
 
+def _keep(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    global _LAST_WINDOWS
+    _LAST_WINDOWS = list(rows)
+    return {"windows": _LAST_WINDOWS}
+
+
+def _last_or_empty() -> dict[str, Any]:
+    return {"windows": list(_LAST_WINDOWS)} if _LAST_WINDOWS else {"windows": []}
+
+
 def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
     path, data, oauth = _load_claude_oauth()
     key = (api_key or "").strip()
@@ -358,15 +369,11 @@ def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
                 if r.status_code == 401:
                     return _notice("Claude login expired. Log in to see 5-hour and weekly limits.")
             if r.status_code == 429:
-                return _notice(
-                    "Claude rate-limited this check. Press Refresh in a moment.",
-                    action="retry",
-                    label="Refresh",
-                )
+                return _last_or_empty()
             if r.status_code < 400:
                 rows = windows_from_oauth_usage(r.json())
                 if rows:
-                    return {"windows": rows}
+                    return _keep(rows)
         except Exception:
             pass
     if not key:
@@ -388,7 +395,7 @@ def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
         )
         rows = windows_from_headers(r.headers)
         if rows:
-            return {"windows": rows}
+            return _keep(rows)
     except Exception:
         pass
     return _notice("Couldn't read Claude plan limits. Log in to refresh, or press Refresh.", action="retry", label="Refresh")

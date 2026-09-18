@@ -49,3 +49,39 @@ def test_anthropic_token_headers() -> None:
     )
     assert rows[0]["used"] == 60000
     assert rows[0]["unit"] == "tokens"
+
+
+def test_429_keeps_last_windows_without_notice(monkeypatch) -> None:
+    import httpx
+    import usage as u
+
+    u._LAST_WINDOWS = [
+        {"id": "hourly", "label": "5-hour limit", "used": 40, "limit": 100, "readout": "40%"}
+    ]
+
+    class _R:
+        status_code = 429
+
+    monkeypatch.setattr(u, "_load_claude_oauth", lambda: (None, {}, {"accessToken": "tok"}))
+    monkeypatch.setattr(u, "_oauth_expired", lambda oauth: False)
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _R())
+    out = u.fetch_usage("")
+    assert out["windows"][0]["used"] == 40
+    assert "notice" not in out
+
+
+def test_429_without_last_is_empty(monkeypatch) -> None:
+    import httpx
+    import usage as u
+
+    u._LAST_WINDOWS = []
+
+    class _R:
+        status_code = 429
+
+    monkeypatch.setattr(u, "_load_claude_oauth", lambda: (None, {}, {"accessToken": "tok"}))
+    monkeypatch.setattr(u, "_oauth_expired", lambda oauth: False)
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _R())
+    out = u.fetch_usage("")
+    assert out == {"windows": []}
+
