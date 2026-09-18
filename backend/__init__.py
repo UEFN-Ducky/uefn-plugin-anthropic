@@ -21,6 +21,12 @@ def _fetch_models(api_key: str, **_kw: Any) -> Any:
     return fetch_models(api_key)
 
 
+def _fetch_usage(api_key: str, **kw: Any) -> Any:
+    from .usage import fetch_usage
+
+    return fetch_usage(api_key, model=str(kw.get("model") or ""))
+
+
 def _anthropic_id_for_family(family: str) -> str:
     fam = (family or "sonnet").strip().lower()
     try:
@@ -277,6 +283,7 @@ def register(api) -> None:
         "anthropic",
         factory=lambda api_key, model, **kw: AnthropicProvider(api_key, model, **kw),
         fetch_models=_fetch_models,
+        fetch_usage=_fetch_usage,
         test_key_model="claude-haiku-4-5-20251001",
         tool_schema="anthropic",
         clear_model_cache=clear_model_cache,
