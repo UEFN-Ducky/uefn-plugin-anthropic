@@ -326,4 +326,7 @@ def register(api) -> None:
         schedule_cli_update_on_plugin_load()
     except Exception:
         pass
+    from . import graph_nodes
+
+    graph_nodes.register_nodes(api)
     api.log("Anthropic gateway contribution active (Providers + Claude Code + IDE)")

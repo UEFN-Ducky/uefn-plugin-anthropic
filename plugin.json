@@ -1,9 +1,9 @@
 {
   "id": "anthropic",
   "kind": "plugin",
-  "version": "1.0.48",
+  "version": "1.0.49",
   "label": "Anthropic",
-  "description": "Anthropic API key + Claude Code coding agent for Settings → LLMs. Install from Store → Gateways, then enable to show Anthropic under Providers & Keys and Claude Code under Coding Agents.",
+  "description": "Anthropic API key + Claude Code coding agent for Settings \u2192 LLMs. Install from Store \u2192 Gateways, then enable to show Anthropic under Providers & Keys and Claude Code under Coding Agents.",
   "min_app_version": "1.2.45",
   "default_enabled": true,
   "secret_keys": [
@@ -94,7 +94,7 @@
         {
           "target": "settings.llms.provider.ide.apply",
           "title": "Apply connection",
-          "body": "Press Apply (or Re-apply) so UEFN MCP and Ducky skills land in Claude. Then Test — a green check means connected.",
+          "body": "Press Apply (or Re-apply) so UEFN MCP and Ducky skills land in Claude. Then Test \u2014 a green check means connected.",
           "advance": "next",
           "mode": "rect"
         },
@@ -115,14 +115,14 @@
         {
           "target": "settings.llms.provider.agent.login",
           "title": "Log in here",
-          "body": "This is the Claude Code login row. Press Log in — click the sign-in link in the window, then paste the code. A Claude Login tab appears in the terminal list and closes when you cancel or finish. Never paste a login code in chat.",
+          "body": "This is the Claude Code login row. Press Log in \u2014 click the sign-in link in the window, then paste the code. A Claude Login tab appears in the terminal list and closes when you cancel or finish. Never paste a login code in chat.",
           "advance": "require_click",
           "mode": "rect"
         },
         {
           "target": "settings.llms.provider.plugin",
           "title": "Anthropic prompt caching",
-          "body": "Cache markers discount repeated Anthropic prefixes. Extended TTL keeps that cache for an hour — leave both on unless you have a reason not to.",
+          "body": "Cache markers discount repeated Anthropic prefixes. Extended TTL keeps that cache for an hour \u2014 leave both on unless you have a reason not to.",
           "advance": "next",
           "mode": "rect"
         },
@@ -132,6 +132,83 @@
           "body": "Press Back to return to the provider list.",
           "advance": "require_click",
           "mode": "rect"
+        }
+      ]
+    },
+    "automations": {
+      "nodes": [
+        {
+          "id": "anthropic.complete",
+          "label": "Anthropic complete",
+          "group": "Anthropic",
+          "description": "One-shot prompt through the Anthropic gateway. Writes text onto the run.",
+          "config_fields": [
+            {
+              "id": "prompt",
+              "label": "Prompt",
+              "type": "textarea"
+            },
+            {
+              "id": "model",
+              "label": "Model",
+              "type": "model",
+              "provider": "anthropic"
+            }
+          ]
+        }
+      ],
+      "templates": [
+        {
+          "id": "anthropic-complete",
+          "label": "Anthropic complete",
+          "icon": "\u2728",
+          "systems": [
+            "pipeline"
+          ],
+          "description": "Chat prompt through Anthropic, then finish.",
+          "graph": {
+            "nodes": [
+              {
+                "id": "s",
+                "type": "start.chat",
+                "x": 40,
+                "y": 80,
+                "config": {},
+                "label": "Chat",
+                "description": ""
+              },
+              {
+                "id": "c",
+                "type": "anthropic.complete",
+                "x": 280,
+                "y": 80,
+                "config": {},
+                "label": "Complete",
+                "description": ""
+              },
+              {
+                "id": "f",
+                "type": "pipeline.finish",
+                "x": 520,
+                "y": 80,
+                "config": {},
+                "label": "Finish",
+                "description": ""
+              }
+            ],
+            "edges": [
+              {
+                "source": "s",
+                "target": "c",
+                "kind": "main"
+              },
+              {
+                "source": "c",
+                "target": "f",
+                "kind": "main"
+              }
+            ]
+          }
         }
       ]
     }
