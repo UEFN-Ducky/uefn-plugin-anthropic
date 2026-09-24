@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-_CLAUDE_FAMILIES = frozenset({"sonnet", "opus", "haiku", "fable"})
-
 _INSTALL_HELP = (
     "Ducky installs and updates the Claude Code CLI for you when this plugin "
     "is installed or updated — you should not run `claude update` yourself. "
@@ -28,14 +26,18 @@ def _fetch_usage(api_key: str, **kw: Any) -> Any:
 
 
 def _anthropic_id_for_family(family: str) -> str:
-    fam = (family or "sonnet").strip().lower()
+    fam = (family or "").strip().lower()
     try:
         from .claude_code_adapter import claude_code_specific_rows
 
-        hits = [r["id"] for r in claude_code_specific_rows() if fam in r["id"].lower()]
-        if hits:
-            hits.sort(reverse=True)
-            return hits[0]
+        rows = claude_code_specific_rows()
+        if fam:
+            hits = [r["id"] for r in rows if fam in r["id"].lower()]
+            if hits:
+                hits.sort(reverse=True)
+                return hits[0]
+        if rows:
+            return str(rows[0]["id"])
     except Exception:
         pass
     return fam
@@ -46,11 +48,13 @@ def _resolve_api_fallback(model_id: str) -> tuple[str, str] | None:
 
     if not has_key("anthropic"):
         return None
-    mid = (model_id or "").strip() or "sonnet"
-    fam = mid if mid.lower() in _CLAUDE_FAMILIES else "sonnet"
-    if mid.lower() not in _CLAUDE_FAMILIES and mid.startswith("claude"):
+    mid = (model_id or "").strip()
+    if mid.lower().startswith("claude"):
         return "anthropic", mid
-    return "anthropic", _anthropic_id_for_family(fam)
+    resolved = _anthropic_id_for_family(mid)
+    if not resolved:
+        return None
+    return "anthropic", resolved
 
 
 def _complete_one_shot(*, model: str, system: str, user: str) -> str:
@@ -73,7 +77,7 @@ def _complete_one_shot(*, model: str, system: str, user: str) -> str:
         "--output-format",
         "text",
         "--model",
-        model or "sonnet",
+        model or _anthropic_id_for_family(""),
     ]
     if sys_path is not None:
         argv.extend(["--append-system-prompt-file", str(sys_path)])

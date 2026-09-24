@@ -38,9 +38,12 @@ def test_canonical_drops_snapshot_date():
 def test_thinking_flag():
     assert anthropic_supports_thinking("claude-sonnet-4-5")
     assert anthropic_supports_thinking("claude-3-7-sonnet-latest")
+    assert anthropic_supports_thinking("claude-newfamily-9")
     assert not anthropic_supports_thinking("claude-3-5-sonnet-latest")
     assert not anthropic_supports_thinking("claude-3-opus-20240229")
     menu = anthropic_thinking_menu("claude-sonnet-4-5")
     assert menu and menu["levels"][0]["id"] == "off"
     assert menu["levels"][1]["thinking_tokens"] == 2048
     assert anthropic_thinking_menu("claude-3-5-sonnet-latest") is None
+    future = anthropic_thinking_menu("claude-newfamily-9")
+    assert future and len(future["levels"]) > 1

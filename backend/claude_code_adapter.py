@@ -35,14 +35,13 @@ _PERMISSION_MODES = ("acceptEdits", "bypassPermissions", "default", "plan")
 # `claude --model` accepts family aliases (opus/sonnet/…) *or* concrete ids.
 # Live list: /v1/models when an API key is set, else Anthropic's public
 # deprecations table (no key). No hardcoded version pins.
-_FAMILY_ORDER = ("opus", "sonnet", "haiku", "fable")
 _MODELS_TTL_S = 3600.0
 _CACHE_SOURCE = "live"
 
 _MODELS_RETRY_S = 60.0
 
 _models_lock = threading.Lock()
-_models_cache: list[dict[str, str]] | None = None
+_models_cache: list[dict[str, Any]] | None = None
 _models_cache_at = 0.0
 _models_refreshing = False
 _models_attempt_at = 0.0
@@ -59,12 +58,6 @@ def _family_of(model_id: str) -> str:
         if tok.isalpha() and tok not in ("claude", "latest"):
             return tok
     return ""
-
-
-def _order_families(families: set[str]) -> tuple[str, ...]:
-    known = [f for f in _FAMILY_ORDER if f in families]
-    extra = sorted(f for f in families if f not in _FAMILY_ORDER)
-    return tuple(known + extra)
 
 
 def _display_name_for(model_id: str, display_name: str = "") -> str:
@@ -95,12 +88,26 @@ def _is_chat_model_id(model_id: str) -> bool:
     return bool(_family_of(mid))
 
 
-def _row(model_id: str, display_name: str = "") -> dict[str, str]:
+def _row(model_id: str, display_name: str = "") -> dict[str, Any]:
     mid = (model_id or "").strip()
-    return {"id": mid, "name": _display_name_for(mid, display_name), "provider": "Claude Code"}
+    row: dict[str, Any] = {
+        "id": mid,
+        "name": _display_name_for(mid, display_name),
+        "provider": "Claude Code",
+    }
+    try:
+        from .model_fetch import anthropic_thinking_menu
+    except ImportError:
+        from model_fetch import anthropic_thinking_menu
+
+    menu = anthropic_thinking_menu(mid)
+    if menu:
+        row["thinking_menu"] = menu
+        row["supports_thinking_effort"] = True
+    return row
 
 
-def _fetch_api_model_rows() -> list[dict[str, str]]:
+def _fetch_api_model_rows() -> list[dict[str, Any]]:
     """Concrete rows from /v1/models when an Anthropic API key is set."""
     try:
         from backend.agent.secrets import get_key, has_key
@@ -110,7 +117,7 @@ def _fetch_api_model_rows() -> list[dict[str, str]]:
         from backend.agent.model_fetch import fetch_models
         from .model_fetch import canonical_model_id
 
-        rows: list[dict[str, str]] = []
+        rows: list[dict[str, Any]] = []
         seen: set[str] = set()
         for m in fetch_models("anthropic", get_key("anthropic") or ""):
             mid = canonical_model_id(str(getattr(m, "id", "") or ""))
@@ -125,7 +132,7 @@ def _fetch_api_model_rows() -> list[dict[str, str]]:
         return []
 
 
-def _fetch_docs_model_rows() -> list[dict[str, str]]:
+def _fetch_docs_model_rows() -> list[dict[str, Any]]:
     """OAuth / no-key path — scrape Anthropic's public active-model table."""
     try:
         from .model_fetch import fetch_public_active_model_ids
@@ -136,7 +143,7 @@ def _fetch_docs_model_rows() -> list[dict[str, str]]:
         return []
 
 
-def _fetch_catalog_model_rows() -> list[dict[str, str]]:
+def _fetch_catalog_model_rows() -> list[dict[str, Any]]:
     return _fetch_api_model_rows() or _fetch_docs_model_rows()
 
 
@@ -149,7 +156,7 @@ def _models_cache_path() -> Path | None:
         return None
 
 
-def _read_models_disk_cache(*, allow_stale: bool = False) -> list[dict[str, str]] | None:
+def _read_models_disk_cache(*, allow_stale: bool = False) -> list[dict[str, Any]] | None:
     path = _models_cache_path()
     if path is None:
         return None
@@ -168,18 +175,14 @@ def _read_models_disk_cache(*, allow_stale: bool = False) -> list[dict[str, str]
     if not isinstance(models, list):
         return None
     rows = [
-        {
-            "id": str(m.get("id") or "").strip(),
-            "name": str(m.get("name") or m.get("id") or "").strip(),
-            "provider": "Claude Code",
-        }
+        _row(str(m.get("id") or "").strip(), str(m.get("name") or m.get("id") or "").strip())
         for m in models
         if isinstance(m, dict) and str(m.get("id") or "").strip()
     ]
     return rows or None
 
 
-def _write_models_disk_cache(models: list[dict[str, str]]) -> None:
+def _write_models_disk_cache(models: list[dict[str, Any]]) -> None:
     path = _models_cache_path()
     if path is None:
         return
@@ -226,14 +229,7 @@ def _refresh_models_async() -> None:
     threading.Thread(target=_worker, name="claude-code-models", daemon=True).start()
 
 
-def claude_code_families() -> tuple[str, ...]:
-    """Family aliases for the '(latest)' shortcuts at the top of the menu."""
-    rows = claude_code_specific_rows()
-    families = {fam for r in rows if (fam := _family_of(r["id"]))}
-    return _order_families(families)
-
-
-def claude_code_specific_rows() -> list[dict[str, str]]:
+def claude_code_specific_rows() -> list[dict[str, Any]]:
     """Concrete model ids for the picker (cached; never blocks detect())."""
     global _models_cache, _models_cache_at
     now = time.time()
@@ -268,7 +264,7 @@ def claude_code_specific_rows() -> list[dict[str, str]]:
     return list(cache) if cache else []
 
 
-def claude_code_model_rows() -> list[dict[str, str]]:
+def claude_code_model_rows() -> list[dict[str, Any]]:
     """Picker rows: concrete model ids only (no family '(latest)' shortcuts)."""
     return claude_code_specific_rows()
 
@@ -335,8 +331,8 @@ def build_claude_argv(
         argv.extend(["--allowedTools", "mcp__uefn"])
     mode = permission_mode if permission_mode in _PERMISSION_MODES else "acceptEdits"
     argv.extend(["--permission-mode", mode])
-    # Claude Code has no --image flag; grant read access to the attachment dirs so
-    # its Read tool can open the uploaded images referenced in the prompt.
+    # Attachment folders and every added project except cwd. Claude Code has no
+    # --image flag; --add-dir is how its Read tool opens those paths.
     for directory in image_dirs or []:
         argv.extend(["--add-dir", directory])
     if session_id:
@@ -352,7 +348,7 @@ def build_claude_argv(
     if model and model not in ("", "default"):
         argv.extend(["--model", model])
     else:
-        raise ValueError("Claude Code requires a model alias or id (e.g. sonnet/opus/haiku/fable)")
+        raise ValueError("Claude Code requires a model alias or id")
     extra = (extra_args or "").strip()
     if extra:
         argv.extend(shlex.split(extra, posix=False))
@@ -360,6 +356,23 @@ def build_claude_argv(
     if not prompt_via_stdin:
         argv.append(prompt)
     return argv
+
+
+def claude_extra_dirs(cwd: str, image_paths: list[str] | None = None) -> list[str]:
+    """Dirs beyond cwd that this turn may read: image folders and added projects."""
+    dirs = sorted({str(Path(p).resolve().parent) for p in (image_paths or [])})
+    try:
+        from frontend.ui_web.recent_projects import load_recent_projects
+
+        cwd_key = os.path.normcase(str(Path(cwd).resolve()))
+        dirs += [
+            p
+            for p in load_recent_projects()
+            if os.path.normcase(str(Path(p).resolve())) != cwd_key and Path(p).is_dir()
+        ]
+    except Exception:
+        pass
+    return dirs
 
 
 def _image_prompt_suffix(image_paths: list[str]) -> str:
@@ -874,8 +887,7 @@ class ClaudeCodeAdapter:
             return CodingAgentLaunchResult(
                 ok=False,
                 error=(
-                    "No Claude Code model selected. Pick a model (e.g. sonnet, opus, "
-                    "haiku, or fable) for this chat or Ducky profile."
+                    "No Claude Code model selected. Pick a model for this chat or Ducky profile."
                 ),
                 status="error",
             )
@@ -885,7 +897,7 @@ class ClaudeCodeAdapter:
         cfg = coding_agent_cfg(PanelSettings.load(), self.id)
         images = list(image_paths or [])
         full_prompt = prompt + _image_prompt_suffix(images)
-        image_dirs = sorted({str(Path(p).resolve().parent) for p in images})
+        image_dirs = claude_extra_dirs(cwd, images)
 
         # System prompt + user paste must NOT go on Windows argv/env (WinError 206).
         from backend.agent.coding_agents.mcp_inject import write_prompt_file
