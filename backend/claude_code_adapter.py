@@ -358,6 +358,22 @@ def build_claude_argv(
     return argv
 
 
+def _with_chat_captures(image_dirs: list[str], conv_id: str) -> list[str]:
+    """Let Read open screenshots saved in this chat's attachments folder."""
+    try:
+        from frontend.ui_web.conversation_attachments import chat_attachments_dir
+
+        extra = chat_attachments_dir(conv_id, create=True)
+    except Exception:
+        extra = None
+    if extra is None:
+        return image_dirs
+    path = str(extra)
+    if path in image_dirs:
+        return image_dirs
+    return [*image_dirs, path]
+
+
 def claude_extra_dirs(cwd: str, image_paths: list[str] | None = None) -> list[str]:
     """Dirs beyond cwd that this turn may read: image folders and added projects."""
     dirs = sorted({str(Path(p).resolve().parent) for p in (image_paths or [])})
@@ -897,7 +913,7 @@ class ClaudeCodeAdapter:
         cfg = coding_agent_cfg(PanelSettings.load(), self.id)
         images = list(image_paths or [])
         full_prompt = prompt + _image_prompt_suffix(images)
-        image_dirs = claude_extra_dirs(cwd, images)
+        image_dirs = _with_chat_captures(claude_extra_dirs(cwd, images), conv_id)
 
         # System prompt + user paste must NOT go on Windows argv/env (WinError 206).
         from backend.agent.coding_agents.mcp_inject import write_prompt_file
