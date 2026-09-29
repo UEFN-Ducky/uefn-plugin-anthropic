@@ -114,7 +114,11 @@ def _run(argv: list[str], *, timeout_s: float) -> subprocess.CompletedProcess[st
         "env": _env(),
     }
     if os.name == "nt":
+        info = subprocess.STARTUPINFO()
+        info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        info.wShowWindow = 0
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        kwargs["startupinfo"] = info
     return subprocess.run(argv, **kwargs)
 
 
