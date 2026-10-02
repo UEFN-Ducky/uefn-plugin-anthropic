@@ -63,3 +63,20 @@ def test_recent_project_is_add_dir_but_cwd_is_not(tmp_path, monkeypatch):
     added = [argv[i + 1] for i, flag in enumerate(argv) if flag == "--add-dir"]
     assert str(other.resolve()) in added
     assert str(active.resolve()) not in added
+
+
+def test_approval_card_hook_rides_with_the_uefn_bridge():
+    base = dict(
+        binary="claude",
+        prompt="hi",
+        system_prompt="",
+        model="sonnet",
+        extra_args="",
+        session_id="",
+        permission_mode="acceptEdits",
+    )
+    with_bridge = build_claude_argv(mcp_config_path="mcp.json", **base)
+    i = with_bridge.index("--permission-prompt-tool")
+    assert with_bridge[i + 1] == "mcp__uefn__ducky_permission_prompt"
+    # No bridge, no hook: the tool would not exist.
+    assert "--permission-prompt-tool" not in build_claude_argv(mcp_config_path="", **base)

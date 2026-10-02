@@ -30,6 +30,21 @@ _CLAUDE_CODE_PATH_HINT = r"%USERPROFILE%\.local\bin"
 
 _PERMISSION_MODES = ("acceptEdits", "bypassPermissions", "default", "plan")
 
+# Headless Claude Code denies every call its permission mode doesn't already allow (a
+# shell command, a write outside the project). Ducky core's hook turns each one into an
+# Allow/Deny card in the chat instead.
+_PERMISSION_PROMPT_TOOL = "mcp__uefn__ducky_permission_prompt"
+
+
+def _core_has_permission_prompt() -> bool:
+    """Older Ducky builds lack the hook; passing it anyway would fail every turn."""
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec("backend.tools.panel.permission_prompt") is not None
+    except Exception:
+        return False
+
 
 # ── Model menu ───────────────────────────────────────────────────────────────
 # `claude --model` accepts family aliases (opus/sonnet/…) *or* concrete ids.
@@ -329,6 +344,8 @@ def build_claude_argv(
         argv.extend(["--mcp-config", mcp_config_path, "--strict-mcp-config"])
         # The injected `uefn` bridge is pre-approved: the user picked this agent.
         argv.extend(["--allowedTools", "mcp__uefn"])
+        if _core_has_permission_prompt():
+            argv.extend(["--permission-prompt-tool", _PERMISSION_PROMPT_TOOL])
     mode = permission_mode if permission_mode in _PERMISSION_MODES else "acceptEdits"
     argv.extend(["--permission-mode", mode])
     # Attachment folders and every added project except cwd. Claude Code has no
