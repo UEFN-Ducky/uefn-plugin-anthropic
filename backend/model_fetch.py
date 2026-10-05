@@ -204,6 +204,24 @@ def anthropic_supports_thinking(model_id: str) -> bool:
     return "claude" in mid
 
 
+def _cap_supported(caps: Any, key: str) -> bool | None:
+    """caps[key]["supported"] when the API reports it, else None (unknown)."""
+    entry = caps.get(key) if isinstance(caps, dict) else None
+    if isinstance(entry, dict) and isinstance(entry.get("supported"), bool):
+        return entry["supported"]
+    return None
+
+
+def _first_int(record: Any, *keys: str) -> int | None:
+    if not isinstance(record, dict):
+        return None
+    for key in keys:
+        val = record.get(key)
+        if isinstance(val, int) and not isinstance(val, bool):
+            return val
+    return None
+
+
 def _anthropic_info_from_item(
     item: dict[str, Any],
     pricing_catalog: dict[str, _PricingRow] | None = None,
@@ -227,6 +245,9 @@ def _anthropic_info_from_item(
         id=mid,
         display_name=display_name,
         supports_vision=vision,
+        max_images=_first_int(image, "max_images", "max_count", "max_images_per_request"),
+        supports_video=_cap_supported(caps, "video_input"),
+        supports_audio=_cap_supported(caps, "audio_input"),
         supports_tools=_anthropic_supports_tools(caps if isinstance(caps, dict) else {}),
         context_limit=ctx,
         price_in=price_in,
