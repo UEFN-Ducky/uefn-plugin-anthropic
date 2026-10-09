@@ -381,3 +381,117 @@ def test_cancel_arriving_during_cleanup_retains_session():
     result = invoke(client, "old")
     assert result.status == "cancelled" and result.upstream_session_id == "old"
     assert result.submitted and result.cleanup_complete
+
+
+@pytest.mark.parametrize("exception", [KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError])
+@pytest.mark.parametrize("stage", ["connect", "status", "query", "receive", "disconnect"])
+def test_control_flow_exact_identity_after_cleanup(exception, stage):
+    client = Client()
+    original = exception(MARKER)
+    client.errors[stage] = original
+    with pytest.raises(BaseException) as caught:
+        invoke(client, "old")
+    assert caught.value is original
+    assert client.calls[-1] == "disconnect" and not client.active
+
+
+@pytest.mark.parametrize("session", ["", "old"])
+def test_failed_result_never_reaches_callback(session):
+    class Failed(Result):
+        is_error = True
+        result = MARKER
+        errors = [MARKER]
+    class FailedClient(Client):
+        async def receive_response(self):
+            await self.sent.wait()
+            yield Failed()
+    seen = []
+    async def consume(message):
+        seen.append(message)
+    result = invoke(FailedClient(), session, on_message=consume)
+    assert result.error == runner.TURN_ERROR and result.upstream_session_id == session
+    assert seen == [] and MARKER not in repr(result)
+
+
+@pytest.mark.parametrize("session", ["", "old"])
+def test_immediate_status_and_buffered_final_never_query(session):
+    class Buffered(Client):
+        async def get_mcp_status(self):
+            self.calls.append("status")
+            return status()
+        async def receive_response(self):
+            yield Result()
+    client = Buffered()
+    result = invoke(client, session)
+    assert not result.submitted and "query" not in client.calls
+    assert result.upstream_session_id == session and result.status == "error"
+
+
+def test_synchronous_ready_without_receiver_start_fails_closed():
+    class Immediate(Client):
+        async def get_mcp_status(self):
+            return status()
+    client = Immediate()
+    result = invoke(client, "old")
+    assert not result.submitted and result.error == runner.READINESS_ERROR
+    assert "query" not in client.calls
+
+
+def test_startup_final_before_status_completion_never_submits():
+    class Buffered(Client):
+        async def connect(self, prompt=None):
+            await super().connect(prompt)
+            self.final_yielded = anyio.Event()
+        async def receive_response(self):
+            self.final_yielded.set()
+            yield Result()
+        async def get_mcp_status(self):
+            await self.final_yielded.wait()
+            return status()
+    client = Buffered()
+    result = invoke(client, "old")
+    assert not result.submitted and result.upstream_session_id == "old"
+    assert "query" not in client.calls
+
+
+@pytest.mark.parametrize("boundary", ["eof", "callback_timeout"])
+def test_stream_boundary_failure_retains_session_and_cleans(boundary):
+    class Stream(Client):
+        async def receive_response(self):
+            await self.sent.wait()
+            if boundary != "eof":
+                yield Result()
+    async def callback(message):
+        await anyio.sleep(5)
+    client = Stream()
+    result = invoke(client, "old", on_message=callback)
+    assert result.error == runner.TURN_ERROR and result.submitted
+    assert result.upstream_session_id == "old" and result.cleanup_complete
+    assert client.calls[-1] == "disconnect" and not client.active
+
+
+def test_successful_answer_and_tool_messages_preserved():
+    tool = SimpleNamespace(type="tool", content="legitimate tool content")
+    answer = Result()
+    answer.result = "legitimate answer"
+    class Stream(Client):
+        async def receive_response(self):
+            await self.sent.wait()
+            yield tool
+            yield answer
+    seen = []
+    async def callback(message):
+        seen.append(message)
+    result = invoke(Stream(), on_message=callback)
+    assert result.status == "success" and seen == [tool, answer]
+
+
+@pytest.mark.parametrize("cleanup_exception", [GeneratorExit, OSError])
+def test_primary_control_and_cleanup_failure_both_preserved(cleanup_exception):
+    client = Client()
+    primary, secondary = GeneratorExit("primary"), cleanup_exception("secondary")
+    client.errors.update(status=primary, disconnect=secondary)
+    with pytest.raises(BaseExceptionGroup) as caught:
+        invoke(client)
+    assert caught.value.exceptions == (primary, secondary)
+    assert not client.active

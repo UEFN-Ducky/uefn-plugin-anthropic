@@ -9,8 +9,12 @@ Callers construct public ClaudeAgentOptions: preserve model/system prompt,
 resume, cwd/add_dirs, env, settings_sources, strict_mcp_config, hooks and
 permission callbacks/rules. This module never changes those options. Catalog
 presence does not certify effective managed/permission policy or future health.
-The callback receives SDK messages, not MCP status/config/error dictionaries;
-the adapter must translate and sanitize message content under its own contract.
+Failed ResultMessage objects never reach callbacks; failures use TurnResult's
+fixed error. Successful answer/tool messages remain available for translation.
+The public SDK has no output-drained barrier or per-query result correlation.
+Receiver scheduling is NOT wire ownership: even with a running receiver an
+unsolicited result delayed until after query is indistinguishable. Integration
+requires an ordered transport boundary; this module alone cannot certify it.
 
 Deadlines are cooperative AnyIO deadlines. The pinned SDK's shielded close
 (subprocess_cli.py:962-1057) can delay cancellation ~20 seconds and only reaps
@@ -125,6 +129,7 @@ async def run_turn_async(
     client = None
     submitted = False
     cancelled = False
+    control_error = None
     try:
         client = sdk.client_factory(options=options)
         with anyio.CancelScope() as operation:
@@ -146,9 +151,11 @@ async def run_turn_async(
                     response_ok = False
                     response_session = upstream_session_id
                     response_exception = None
+                    receiver_started = False
 
                     async def receive():
-                        nonlocal response_ok, response_session, response_exception
+                        nonlocal response_ok, response_session, response_exception, receiver_started
+                        receiver_started = True
                         try:
                             async for message in client.receive_response():
                                 if not submitted:
@@ -156,12 +163,16 @@ async def run_turn_async(
                                     if isinstance(message, sdk.result_type):
                                         return
                                     continue
-                                if on_message is not None:
-                                    await on_message(message)
                                 if isinstance(message, sdk.result_type):
                                     response_ok = not message.is_error
+                                    if not response_ok:
+                                        # Vendor failure fields may contain private
+                                        # diagnostics. Classify before any callback.
+                                        return
                                     if response_ok and isinstance(message.session_id, str):
                                         response_session = message.session_id
+                                if on_message is not None:
+                                    await on_message(message)
                         except Exception:
                             response_ok = False
                         except BaseException as exc:
@@ -182,7 +193,10 @@ async def run_turn_async(
                                     raise response_exception
                                 raise ValueError
                             await anyio.sleep(poll_interval)
-                        if response_done.is_set():
+                        # Fail closed if a synchronous status response outran
+                        # receiver startup. Do not sleep/yield to manufacture a
+                        # purported SDK drain barrier; none exists publicly.
+                        if not receiver_started or response_done.is_set():
                             if response_exception is not None:
                                 raise response_exception
                             raise ValueError
@@ -215,6 +229,12 @@ async def run_turn_async(
                              upstream_session_id=upstream_session_id)
     except Exception:
         result = replace(result, error=TURN_ERROR if submitted else READINESS_ERROR)
+    except BaseException as exc:
+        # AnyIO wraps a lone control-flow failure on task-group exit. Unwrap
+        # only singleton groups; preserve genuinely concurrent failures.
+        while isinstance(exc, BaseExceptionGroup) and len(exc.exceptions) == 1:
+            exc = exc.exceptions[0]
+        control_error = exc
     finally:
         if client is not None:
             complete = False
@@ -223,11 +243,16 @@ async def run_turn_async(
                 with anyio.move_on_after(cleanup_timeout, shield=True) as cleanup:
                     await client.disconnect()
                     complete = not cleanup.cancel_called and anyio.current_time() < cleanup_deadline
-            except Exception:
-                pass
+            except BaseException as exc:
+                if control_error is not None:
+                    control_error = BaseExceptionGroup("Turn and cleanup failed", [control_error, exc])
+                elif not isinstance(exc, Exception):
+                    control_error = exc
             if not complete:
                 result = replace(result, status="error", error=CLEANUP_ERROR,
                                  upstream_session_id=upstream_session_id, cleanup_complete=False)
+    if control_error is not None:
+        raise control_error
     if result.cleanup_complete and cancel is not None and cancel.is_set():
         result = replace(result, status="cancelled", error="Cancelled",
                          upstream_session_id=upstream_session_id)
