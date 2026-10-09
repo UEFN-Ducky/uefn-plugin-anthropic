@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import threading
 import time
@@ -64,13 +65,20 @@ def _valid_ducky_mcp_config(config_path: str) -> bool:
         if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
             return False
         mapping = server.get("env", {})
-    elif transport in ("http", "sse"):
+    elif transport in ("http", "streamable-http", "sse", "ws"):
         url = server.get("url")
-        if not isinstance(url, str):
+        if not isinstance(url, str) or not url.strip():
             return False
-        parsed = urlsplit(url)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
-            return False
+        # Claude owns ${VAR}/${VAR:-default} expansion, including unset-variable
+        # warnings and credential filtering. Do not read secrets or validate an
+        # unresolved template as a literal URL. The original file goes to the
+        # CLI unchanged; expansion and the resulting endpoint are runtime checks.
+        # https://code.claude.com/docs/en/mcp#environment-variable-expansion-in-mcpjson
+        if not re.search(r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}", url):
+            parsed = urlsplit(url)
+            schemes = ("ws", "wss") if transport == "ws" else ("http", "https")
+            if parsed.scheme not in schemes or not parsed.hostname:
+                return False
         mapping = server.get("headers", {})
     else:
         return False

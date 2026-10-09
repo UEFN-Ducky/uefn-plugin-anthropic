@@ -160,11 +160,17 @@ def test_cancellation_does_not_start_cli(tmp_path, monkeypatch, launch, session,
     {"type": "stdio", "command": "node"},
     {"type": "http", "url": "https://example.invalid/mcp", "headers": {"X-Test": "test"}},
     {"type": "sse", "url": "http://example.invalid/sse"},
+    {"type": "http", "url": "${INDEPENDENT_URL}/mcp"},
+    {"type": "http", "url": "${INDEPENDENT_UNSET:-https://example.invalid}/mcp"},
+    {"type": "streamable-http", "url": "https://example.invalid/mcp"},
+    {"type": "ws", "url": "wss://example.invalid/socket"},
 ])
 def test_valid_config_preserves_launch(tmp_path, monkeypatch, launch, session, server):
     from frontend.settings import PanelSettings
     from backend.agent.coding_agents.proc_exec import ProcResult
 
+    monkeypatch.setenv("INDEPENDENT_URL", "https://example.invalid")
+    monkeypatch.delenv("INDEPENDENT_UNSET", raising=False)
     path = tmp_path / "mcp.json"
     path.write_text(json.dumps({"mcpServers": {"uefn": server}}), encoding="utf-8")
     monkeypatch.setattr(adapter, "resolve_claude_bin", lambda _: "claude-test")
@@ -189,6 +195,7 @@ def test_valid_config_preserves_launch(tmp_path, monkeypatch, launch, session, s
     assert "--strict-mcp-config" in argv
     assert argv[argv.index("--permission-prompt-tool") + 1] == adapter._PERMISSION_PROMPT_TOOL
     assert calls[0]["stdin_data"] == "test user task"
+    assert json.loads(path.read_text(encoding="utf-8")) == {"mcpServers": {"uefn": server}}
     assert ("--resume" in argv) == bool(session)
     if session:
         assert argv[argv.index("--resume") + 1] == session
@@ -200,3 +207,68 @@ def test_init_does_not_claim_tools_ready():
     state.on_line(json.dumps({"type": "system", "subtype": "init", "model": "sonnet",
                              "mcp_servers": [{"name": "uefn", "status": "failed"}], "tools": []}))
     assert events and "ready" not in events[-1]["text"].lower()
+
+
+@pytest.mark.parametrize("session", ["", "previous-session"])
+@pytest.mark.parametrize("url,variable_value", [
+    ("${INDEPENDENT_EDGE}/mcp", None),
+    ("${INDEPENDENT_EDGE:-https://example.invalid}/mcp", ""),
+    ("${INDEPENDENT_EDGE:-}/mcp", None),
+    ("${INDEPENDENT_EDGE}/mcp", MARKER),
+    ("https://${INDEPENDENT_EDGE}/mcp", "example.invalid"),
+    ("${INDEPENDENT_EDGE:-https://example.invalid:8443}/mcp", None),
+])
+def test_url_expansion_is_left_to_cli(tmp_path, monkeypatch, launch, session, url, variable_value):
+    # These are valid config templates, not evidence of a usable endpoint.
+    if variable_value is None:
+        monkeypatch.delenv("INDEPENDENT_EDGE", raising=False)
+    else:
+        monkeypatch.setenv("INDEPENDENT_EDGE", variable_value)
+    test_valid_config_preserves_launch(
+        tmp_path, monkeypatch, launch, session, {"type": "http", "url": url},
+    )
+    assert MARKER not in json.dumps(launch.events)
+
+
+@pytest.mark.parametrize("session", ["", "previous-session"])
+@pytest.mark.parametrize("server", [
+    {"type": "ws", "url": "ws://example.invalid/socket"},
+    {"type": "streamable-http", "url": "${INDEPENDENT_URL}/mcp"},
+    {"type": "ws", "url": "${INDEPENDENT_URL}/socket"},
+])
+def test_additional_vendor_transports(tmp_path, monkeypatch, launch, session, server):
+    test_valid_config_preserves_launch(tmp_path, monkeypatch, launch, session, server)
+
+
+@pytest.mark.parametrize("session", ["", "previous-session"])
+@pytest.mark.parametrize("server", [
+    {"type": "ws", "url": "https://example.invalid/socket"},
+    {"type": "ws", "url": "wss://"},
+    {"type": "streamable-http", "url": "file:///bad"},
+    {"type": "http", "url": ""},
+    {"type": "http", "url": "${}/mcp"},
+    {"type": "http", "url": "${BAD-NAME}/mcp"},
+    {"type": "http", "url": "${UNFINISHED/mcp"},
+    {"type": "http", "url": "${NAME:default}/mcp"},
+    {"type": "ws", "url": 7},
+    {"type": "streamable-http", "url": "${NAME}/mcp", "headers": {"X-Test": 7}},
+])
+def test_invalid_new_transport_and_template_structure(tmp_path, launch, session, server):
+    test_invalid_config_fails_before_cli(
+        tmp_path, launch, session, json.dumps({"mcpServers": {"uefn": server}}).encode(),
+    )
+
+
+def test_template_preflight_does_not_read_environment(tmp_path, monkeypatch):
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"mcpServers": {"uefn": {
+        "type": "http", "url": "${SYNTHETIC_SECRET:-https://example.invalid}/mcp",
+        "headers": {"Authorization": "Bearer ${SYNTHETIC_SECRET}"},
+    }}}), encoding="utf-8")
+    class NoEnvironmentReads(dict):
+        def get(self, *args, **kwargs):
+            pytest.fail("preflight must leave vendor expansion to the CLI")
+        def __getitem__(self, key):
+            pytest.fail("preflight must not read secret environment values")
+    monkeypatch.setattr(adapter.os, "environ", NoEnvironmentReads())
+    assert adapter._valid_ducky_mcp_config(str(path))
