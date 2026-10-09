@@ -546,3 +546,83 @@ def test_control_flow_preserved_when_cleanup_unconfirmed(tmp_path, monkeypatch):
             await transport.close()
         assert transport.cleanup_complete
     run(case())
+
+
+@pytest.mark.parametrize("mode", ["success", "cancel", "close"])
+def test_overlapping_connect_has_one_resource_owner(tmp_path, monkeypatch, mode):
+    saved = []
+    original = t._Windows.spawn_suspended
+    marker = tmp_path / "overlap-executed"
+    def capture(win, launch, children):
+        handles = original(win, launch, children)
+        saved.append((win, handles))
+        if mode == "cancel": asyncio.current_task().cancel("startup cancellation")
+        return handles
+    monkeypatch.setattr(t._Windows, "spawn_suspended", capture)
+    async def case():
+        obj = t.OwnedTransport(spec(tmp_path, f'import time\nopen({str(marker)!r},"w").close()\ntime.sleep(30)'))
+        try:
+            calls = [obj.connect(), obj.connect()]
+            if mode == "close": calls.append(obj.close())
+            outcomes = await asyncio.gather(*calls, return_exceptions=True)
+            if mode == "success":
+                assert outcomes[0] is None and obj.is_ready()
+            else:
+                assert isinstance(outcomes[0], asyncio.CancelledError if mode == "cancel" else t.TransportError)
+                assert not marker.exists()
+            assert isinstance(outcomes[1], t.TransportError)
+            assert len(saved) == 1
+            await obj.close()
+            assert obj.cleanup_complete and obj._pump_task is None
+            for win, handles in saved:
+                for handle in handles[:2]:
+                    with pytest.raises(win.handles.error) as caught:
+                        win.handles.GetHandleInformation(handle)
+                    assert caught.value.winerror == 6  # ERROR_INVALID_HANDLE
+        finally:
+            await obj.close()
+            # Clean exact recorded handles even on the pre-fix leak reproduction.
+            for win, handles in saved:
+                for handle in handles[:2]:
+                    try: win.api.CloseHandle(handle)
+                    except OSError: pass
+    run(case())
+
+
+def test_repeated_overlapping_connect_no_handle_growth(tmp_path, monkeypatch):
+    import ctypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel.GetProcessHandleCount.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    def count():
+        value = ctypes.c_ulong()
+        assert kernel.GetProcessHandleCount(kernel.GetCurrentProcess(), ctypes.byref(value))
+        return value.value
+    async def case():
+        warm = t.OwnedTransport(spec(tmp_path))
+        await warm.connect(); await warm.close()
+        before, tasks = count(), set(asyncio.all_tasks())
+        saved = []
+        original = t._Windows.spawn_suspended
+        def capture(win, launch, children):
+            handles = original(win, launch, children)
+            saved.append((win, handles))
+            return handles
+        monkeypatch.setattr(t._Windows, "spawn_suspended", capture)
+        for _ in range(6):
+            obj = t.OwnedTransport(spec(tmp_path))
+            try:
+                outcomes = await asyncio.gather(obj.connect(), obj.connect(), return_exceptions=True)
+                assert outcomes[0] is None and isinstance(outcomes[1], t.TransportError)
+            finally:
+                await obj.close()
+                current_count = count()
+                for win, handles in saved:
+                    for handle in handles[:2]:
+                        try: win.api.CloseHandle(handle)
+                        except OSError: pass
+                saved.clear()
+            assert current_count == before
+        assert count() == before
+        assert set(asyncio.all_tasks()) == tasks
+    run(case())

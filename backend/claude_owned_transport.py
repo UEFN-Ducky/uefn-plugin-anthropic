@@ -266,6 +266,7 @@ class OwnedTransport:
         self._loop = None
         self._pump_task = None
         self._closing = False
+        self._connecting = False
         self._connected = False
         self._error = False
         self._control_failure = None
@@ -290,10 +291,13 @@ class OwnedTransport:
 
     async def connect(self):
         self._check_thread()
-        if self._connected or self._closing:
+        if self._connecting or self._connected or self._closing:
             raise TransportError(FAILED)
         started = time.monotonic()
         self._loop = asyncio.get_running_loop()
+        # Claim ownership before any resource creation or cancellation checkpoint.
+        # Rejected overlapping callers must not enter the owner's cleanup path.
+        self._connecting = True
         try:
             self.spec.validate()
             self._win = _Windows()
@@ -310,7 +314,7 @@ class OwnedTransport:
                 raise TransportError(FAILED)
             # First cancellation checkpoint while the child is still suspended.
             await asyncio.sleep(0)
-            if time.monotonic() - started >= self.spec.limits.startup:
+            if self._closing or time.monotonic() - started >= self.spec.limits.startup:
                 raise TransportError(FAILED)
             self._win.process.ResumeThread(self._thread)
             self._win.api.CloseHandle(self._thread)
@@ -323,6 +327,8 @@ class OwnedTransport:
                 raise
             reason = str(exc) if isinstance(exc, TransportError) and str(exc) in (INVALID, UNAVAILABLE) else FAILED
             raise TransportError(reason) from None
+        finally:
+            self._connecting = False
 
     def _new_op(self, handle, data=None):
         op = _Operation(self._win, handle, data)
