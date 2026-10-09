@@ -15,6 +15,9 @@ The public SDK has no output-drained barrier or per-query result correlation.
 Receiver scheduling is NOT wire ownership: even with a running receiver an
 unsolicited result delayed until after query is indistinguishable. Integration
 requires an ordered transport boundary; this module alone cannot certify it.
+The default production route therefore refuses before constructing a client.
+Explicit binding injection exercises test doubles only; it is not an integration
+override or evidence that a real SDK session has established response ownership.
 
 Deadlines are cooperative AnyIO deadlines. The pinned SDK's shielded close
 (subprocess_cli.py:962-1057) can delay cancellation ~20 seconds and only reaps
@@ -42,6 +45,10 @@ READINESS_ERROR = "Ducky tools unavailable: check the required Ducky MCP connect
 TIMEOUT_ERROR = "Ducky tools unavailable: startup timed out. Check the Ducky MCP connection, then retry."
 TURN_ERROR = "Claude turn failed after submission. Check the chat before retrying; the task may have run."
 CLEANUP_ERROR = "Claude session cleanup was not confirmed. Check the running session before retrying."
+ORDERING_UNAVAILABLE = (
+    "Ducky tools unavailable: Claude response ownership cannot be established. "
+    "Ask the Ducky maintainer for the supported session integration before retrying."
+)
 
 
 @dataclass(frozen=True)
@@ -55,7 +62,7 @@ class TurnResult:
 
 @dataclass(frozen=True)
 class SDKBinding:
-    """Injection seam for tests; production loads the pinned public package."""
+    """Test-double seam, not a production response-ownership certificate."""
     version: str
     client_factory: Callable[..., Any]
     result_type: type
@@ -102,7 +109,7 @@ async def run_turn_async(
     cleanup_timeout: float = 25, poll_interval: float = 0.05,
     require_permission_tool: bool = True, binding: SDKBinding | None = None,
 ) -> TurnResult:
-    """Connect(None), certify same-client status/catalog, query ONCE, consume result.
+    """Default route fails closed; injected test doubles exercise the turn protocol.
 
     on_message is an async, cancellation-cooperative consumer. Exceptions and
     timeouts after query begins return submitted=True: never automatically retry.
@@ -119,6 +126,11 @@ async def run_turn_async(
             return replace(result, error=UNAVAILABLE)
     except Exception:
         return replace(result, error=UNAVAILABLE)
+    if binding is None:
+        # Pinned public APIs lack an ordered drain/correlation contract. Do not
+        # turn scheduling observations or a caller Boolean into certification.
+        # Keep the test seam isolated until a supported integration exists.
+        return replace(result, error=ORDERING_UNAVAILABLE)
     if not all(math.isfinite(value) and value > 0 for value in
                (startup_timeout, turn_timeout, cleanup_timeout, poll_interval)):
         return result

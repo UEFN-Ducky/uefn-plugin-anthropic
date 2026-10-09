@@ -495,3 +495,27 @@ def test_primary_control_and_cleanup_failure_both_preserved(cleanup_exception):
         invoke(client)
     assert caught.value.exceptions == (primary, secondary)
     assert not client.active
+
+
+@pytest.mark.parametrize("session", ["", "old"])
+@pytest.mark.parametrize("buffered", [False, True])
+def test_default_production_route_rejects_uncertified_ordering(monkeypatch, session, buffered):
+    class LoadedClient(Client):
+        async def receive_response(self):
+            if buffered:
+                yield Result()
+            else:
+                async for message in super().receive_response():
+                    yield message
+    client = LoadedClient()
+    monkeypatch.setattr(runner, "_load_sdk", lambda: runner.SDKBinding(
+        runner.SDK_VERSION, client.factory, Result))
+    seen = []
+    async def callback(message):
+        seen.append(message)
+    result = runner.run_turn(options=SimpleNamespace(resume=session or None),
+        prompt="original user task", upstream_session_id=session, on_message=callback)
+    assert result.status == "error" and not result.submitted
+    assert result.upstream_session_id == session
+    assert "response ownership" in result.error.lower()
+    assert client.calls == [] and seen == []
