@@ -14,6 +14,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from backend.agent.coding_agents.base import (
     CodingAgentCapabilities,
@@ -34,6 +35,48 @@ _PERMISSION_MODES = ("acceptEdits", "bypassPermissions", "default", "plan")
 # shell command, a write outside the project). Ducky core's hook turns each one into an
 # Allow/Deny card in the chat instead.
 _PERMISSION_PROMPT_TOOL = "mcp__uefn__ducky_permission_prompt"
+
+
+def _valid_ducky_mcp_config(config_path: str) -> bool:
+    """Validate the required server before any CLI setup; this is not a live probe.
+
+    --strict-mcp-config only selects config sources. The text-stdin transport
+    sends the prompt before init callbacks, so it cannot gate task execution on
+    that later connection/catalog report.
+    """
+    if not config_path or not config_path.strip():
+        return False
+    config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        return False
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict):
+        return False
+    server = servers.get("uefn")
+    if not isinstance(server, dict):
+        return False
+    transport = server.get("type", "stdio")
+    if transport == "stdio":
+        command = server.get("command")
+        args = server.get("args", [])
+        if not isinstance(command, str) or not command.strip():
+            return False
+        if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+            return False
+        mapping = server.get("env", {})
+    elif transport in ("http", "sse"):
+        url = server.get("url")
+        if not isinstance(url, str):
+            return False
+        parsed = urlsplit(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return False
+        mapping = server.get("headers", {})
+    else:
+        return False
+    return isinstance(mapping, dict) and all(
+        isinstance(key, str) and isinstance(value, str) for key, value in mapping.items()
+    )
 
 
 def _core_has_permission_prompt() -> bool:
@@ -669,7 +712,8 @@ class _StreamState:
             subtype = str(data.get("subtype") or "")
             if subtype == "init":
                 model = str(data.get("model") or self.model or "").strip()
-                text = f"Claude Code ready · {model}" if model else "Claude Code ready…"
+                # Init reports session metadata, not guaranteed MCP readiness.
+                text = f"Claude Code initialized · {model}" if model else "Claude Code initialized…"
                 self._emit({"type": "status", "text": text})
             return
         if kind == "stream_event":
@@ -915,6 +959,27 @@ class ClaudeCodeAdapter:
         timeout_s: float = 0.0,
         image_paths: list[str] | None = None,
     ) -> CodingAgentLaunchResult:
+        if cancel is not None and cancel.is_set():
+            return CodingAgentLaunchResult(
+                ok=False, status="cancelled", error="Cancelled", upstream_session_id=session_id,
+            )
+        try:
+            config_valid = _valid_ducky_mcp_config(mcp_config_path)
+        except Exception:
+            # Configuration and filesystem errors can contain credentials or
+            # private paths. Do not expose their text; preserve BaseException.
+            config_valid = False
+        if cancel is not None and cancel.is_set():
+            return CodingAgentLaunchResult(
+                ok=False, status="cancelled", error="Cancelled", upstream_session_id=session_id,
+            )
+        if not config_valid:
+            return CodingAgentLaunchResult(
+                ok=False,
+                status="error",
+                error="Ducky tools unavailable: invalid or unreadable MCP configuration.",
+                upstream_session_id=session_id,
+            )
         model_id = (model or "").strip()
         if not model_id or model_id.lower() == "default":
             return CodingAgentLaunchResult(
