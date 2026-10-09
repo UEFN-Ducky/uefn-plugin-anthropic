@@ -7,6 +7,7 @@ it back on later turns. Core only stores the id.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
+from backend.agent.coding_agents import base as _coding_base
 from backend.agent.coding_agents.base import (
     CodingAgentCapabilities,
     CodingAgentInfo,
@@ -26,6 +28,29 @@ from .claude_auth import is_claude_logged_in, resolve_claude_bin
 from backend.agent.coding_agents.cli_shared import finalize_cli_turn, truncate_tool_result
 from backend.agent.coding_agents.proc_exec import run_streaming_process
 from backend.agent.coding_agents.settings_helpers import coding_agent_cfg
+
+
+def _legacy_normalize_mode(mode: str | None = "agent") -> str:
+    if mode is None or mode == "":
+        return "agent"
+    if isinstance(mode, str) and mode.strip().lower() in ("agent", "ask", "plan"):
+        return mode.strip().lower()
+    raise ValueError("Invalid coding-agent mode")
+
+
+# Published hosts may lack the mode helper and optional constructor fields.
+# Inspect named parameters rather than catching unrelated constructor failures.
+normalize_coding_mode = getattr(_coding_base, "normalize_coding_mode", _legacy_normalize_mode)
+_CAPABILITY_PARAMETERS = inspect.signature(CodingAgentCapabilities).parameters
+_RESULT_PARAMETERS = inspect.signature(CodingAgentLaunchResult).parameters
+
+
+def _launch_result(**kwargs: Any) -> CodingAgentLaunchResult:
+    for name in ("requested_mode", "effective_mode"):
+        if name not in _RESULT_PARAMETERS:
+            kwargs.pop(name, None)
+    return CodingAgentLaunchResult(**kwargs)
+
 
 _CLAUDE_CODE_INSTALL_PS = "irm https://claude.ai/install.ps1 | iex"
 _CLAUDE_CODE_PATH_HINT = r"%USERPROFILE%\.local\bin"
@@ -503,6 +528,7 @@ class _StreamState:
         self.is_error = False
         self.error_text = ""
         self.saw_json = False
+        self.saw_work = False
         self.model = ""
         self.usage: dict[str, Any] = {}
         # Last assistant-step context window (input+cache). result.usage is
@@ -701,12 +727,15 @@ class _StreamState:
 
     def on_line(self, line: str) -> None:
         if not line.startswith("{"):
+            self.saw_work = self.saw_work or bool(line.strip())
             return
         try:
             data = json.loads(line)
         except json.JSONDecodeError:
+            self.saw_work = True
             return
         if not isinstance(data, dict):
+            self.saw_work = True
             return
         self.saw_json = True
         sid = str(data.get("session_id") or "")
@@ -716,6 +745,8 @@ class _StreamState:
         if model:
             self.model = model
         kind = str(data.get("type") or "")
+        if kind != "result" and not (kind == "system" and data.get("subtype") == "init"):
+            self.saw_work = True
         if kind == "system":
             subtype = str(data.get("subtype") or "")
             if subtype == "init":
@@ -907,6 +938,7 @@ class ClaudeCodeAdapter:
         needs_api_key=False,
         needs_cli=True,
         resume=True,
+        **({"supported_modes": ("agent",)} if "supported_modes" in _CAPABILITY_PARAMETERS else {}),
     )
 
     def detect(self, settings: Any) -> CodingAgentInfo:
@@ -966,11 +998,39 @@ class ClaudeCodeAdapter:
         cancel: threading.Event | None = None,
         timeout_s: float = 0.0,
         image_paths: list[str] | None = None,
+        mode: str = "agent",
     ) -> CodingAgentLaunchResult:
-        if cancel is not None and cancel.is_set():
-            return CodingAgentLaunchResult(
-                ok=False, status="cancelled", error="Cancelled", upstream_session_id=session_id,
+        try:
+            mode = normalize_coding_mode(mode)
+        except ValueError:
+            return _launch_result(
+                ok=False, status="error", error="Invalid Claude Code Ducky mode.",
+                upstream_session_id=session_id, requested_mode=str(mode).strip().lower(), effective_mode="",
             )
+        if mode != "agent":
+            return _launch_result(
+                ok=False, status="error", error="Claude Code does not support Ducky Ask/Plan yet.",
+                upstream_session_id=session_id, requested_mode=mode, effective_mode="",
+            )
+        original_push = push
+
+        def push(event: dict[str, Any]) -> None:
+            original_push({**event, "requested_mode": mode, "effective_mode": ""})
+
+        def with_mode(result: CodingAgentLaunchResult) -> CodingAgentLaunchResult:
+            if "requested_mode" in _RESULT_PARAMETERS:
+                result.requested_mode = mode
+            if "effective_mode" in _RESULT_PARAMETERS:
+                result.effective_mode = mode if result.ok and result.status not in ("cancelled", "timeout") else ""
+            return result
+
+        def cancelled() -> bool:
+            return cancel is not None and cancel.is_set()
+
+        if cancel is not None and cancel.is_set():
+            return with_mode(_launch_result(
+                ok=False, status="cancelled", error="Cancelled", upstream_session_id=session_id,
+            ))
         try:
             config_valid = _valid_ducky_mcp_config(mcp_config_path)
         except Exception:
@@ -978,25 +1038,25 @@ class ClaudeCodeAdapter:
             # private paths. Do not expose their text; preserve BaseException.
             config_valid = False
         if cancel is not None and cancel.is_set():
-            return CodingAgentLaunchResult(
+            return with_mode(_launch_result(
                 ok=False, status="cancelled", error="Cancelled", upstream_session_id=session_id,
-            )
+            ))
         if not config_valid:
-            return CodingAgentLaunchResult(
+            return with_mode(_launch_result(
                 ok=False,
                 status="error",
                 error="Ducky tools unavailable: invalid or unreadable MCP configuration.",
                 upstream_session_id=session_id,
-            )
+            ))
         model_id = (model or "").strip()
         if not model_id or model_id.lower() == "default":
-            return CodingAgentLaunchResult(
+            return with_mode(_launch_result(
                 ok=False,
                 error=(
                     "No Claude Code model selected. Pick a model for this chat or Ducky profile."
                 ),
-                status="error",
-            )
+                status="error", upstream_session_id=session_id,
+            ))
         binary = resolve_claude_bin(cli_path) or "claude"
         from frontend.settings import PanelSettings
 
@@ -1027,176 +1087,98 @@ class ClaudeCodeAdapter:
                 permission_mode=str(cfg.get("permission_mode") or "acceptEdits"),
                 image_dirs=image_dirs,
             )
-            state = _StreamState(conv_id, run_id, push)
-            if session_id:
-                push(
-                    {
-                        "type": "status",
-                        "text": "Resumed Claude Code session…",
-                        "conv_id": conv_id,
-                        "run_id": run_id,
-                    }
-                )
-            else:
-                push(
-                    {
-                        "type": "status",
-                        "text": "Starting Claude Code…",
-                        "conv_id": conv_id,
-                        "run_id": run_id,
-                    }
-                )
-            proc = run_streaming_process(
-                argv=argv,
-                cwd=cwd,
-                env_extra=env,
-                conv_id=conv_id,
-                on_line=state.on_line,
-                timeout_s=timeout_s,
-                cancel=cancel,
-                stdin_data=full_prompt,
-            )
-            err_low = (proc.stderr_tail or "").lower()
-            if (
-                proc.returncode != 0
-                and state.stdout_empty()
-                and "unknown option" in err_low
-                and "append-system-prompt-file" in err_low
-                and sys_path is not None
-            ):
-                # Older CLI: no --append-system-prompt-file — fold system text into stdin.
-                argv = build_claude_argv(
-                    binary=binary,
-                    prompt="",
-                    system_prompt="",
-                    prompt_via_stdin=True,
-                    model=model,
-                    mcp_config_path=mcp_config_path,
-                    extra_args=extra_args,
-                    session_id=session_id,
-                    permission_mode=str(cfg.get("permission_mode") or "acceptEdits"),
-                    image_dirs=image_dirs,
-                )
-                state = _StreamState(conv_id, run_id, push)
-                stdin_merged = (
-                    f"<ducky-system-prompt>\n{system_prompt.strip()}\n"
-                    f"</ducky-system-prompt>\n\n{full_prompt}"
-                )
-                proc = run_streaming_process(
-                    argv=argv,
-                    cwd=cwd,
-                    env_extra=env,
-                    conv_id=conv_id,
-                    on_line=state.on_line,
-                    timeout_s=timeout_s,
-                    cancel=cancel,
-                    stdin_data=stdin_merged,
-                )
-                err_low = (proc.stderr_tail or "").lower()
-            if (
-                proc.returncode != 0
-                and state.stdout_empty()
-                and "--include-partial-messages" in argv
-                and "unknown option" in err_low
-            ):
-                # Older CLI without partial-message streaming — retry without it.
-                argv = [a for a in argv if a != "--include-partial-messages"]
+            push({
+                "type": "status",
+                "text": "Resumed Claude Code session…" if session_id else "Starting Claude Code…",
+                "conv_id": conv_id, "run_id": run_id,
+            })
+            stdin_payload = full_prompt
+            updated = False
+            previous_result = None
+            while True:
+                # A cancellation observed between attempts returns the original
+                # finalized outcome; it does not relabel an unrelated error.
+                if cancelled():
+                    return previous_result if previous_result is not None else with_mode(_launch_result(
+                        ok=False, status="cancelled", error="Cancelled", upstream_session_id=session_id,
+                    ))
                 state = _StreamState(conv_id, run_id, push)
                 proc = run_streaming_process(
-                    argv=argv,
-                    cwd=cwd,
-                    env_extra=env,
-                    conv_id=conv_id,
-                    on_line=state.on_line,
-                    timeout_s=timeout_s,
-                    cancel=cancel,
-                    stdin_data=full_prompt,
+                    argv=argv, cwd=cwd, env_extra=env, conv_id=conv_id,
+                    on_line=state.on_line, timeout_s=timeout_s, cancel=cancel,
+                    stdin_data=stdin_payload,
                 )
+                # Finalize every attempt before inspecting any retry marker.
+                state.flush_stream()
+                state.finish_unresolved_tools(cancelled=proc.cancelled)
+                blocks = state.finalize_blocks()
+                streamed = "".join(state.streamed_text).strip()
+                reply = state.final_text or state.trailing_text() or ("" if blocks else streamed)
+                result = finalize_cli_turn(
+                    proc=proc, reply=reply, streamed=bool(streamed) or bool(blocks), blocks=blocks,
+                    session_id=session_id, new_session=state.session_id or session_id,
+                    usage=state.usage, agent_label="Claude Code", timeout_s=timeout_s,
+                    error_text=state.error_text, stale_session_markers=("no conversation found",),
+                )
+                # Older shared finalizers omit usage on terminal/error outcomes.
+                if state.usage and not result.usage:
+                    result.usage = state.usage
+                result = with_mode(result)
+                previous_result = result
+                if (proc.cancelled or proc.timed_out or result.status in ("cancelled", "timeout")
+                        or cancelled() or result.ok):
+                    return result
+                # Streamed work, tokens or opaque stdout make replay uncertain.
+                used_tokens = any(state.usage.get(k) for k in (
+                    "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "num_turns", "cost_usd",
+                ))
+                if state.saw_work or blocks or streamed or used_tokens or (proc.raw_tail and not state.saw_json):
+                    return result
+                unknown = re.search(r"unknown option\s*:?\s*['\"]?(--[a-z0-9-]+)(?=['\"]|\s|$)", (proc.stderr_tail or "").lower())
+                flag = unknown.group(1) if unknown else ""
+                if proc.returncode != 0 and state.stdout_empty() and flag in argv:
+                    if flag == "--append-system-prompt-file" and sys_path is not None:
+                        # Remove only this optional compatibility flag and its
+                        # value; preserve all other policy/MCP/session arguments.
+                        index = argv.index(flag)
+                        argv = argv[:index] + argv[index + 2:]
+                        stdin_payload = (
+                            f"<ducky-system-prompt>\n{system_prompt.strip()}\n"
+                            f"</ducky-system-prompt>\n\n{full_prompt}"
+                        )
+                        continue
+                    if flag == "--include-partial-messages":
+                        argv = [arg for arg in argv if arg != flag]
+                        continue
+                from .cli_update import is_cli_too_old_error, update_claude_cli
 
-            # Never leave a chip spinning: whatever ended this turn, resolve leftovers
-            # and push any still-buffered stream text.
-            state.flush_stream()
-            state.finish_unresolved_tools(cancelled=proc.cancelled)
-            blocks = state.finalize_blocks()
-
-            streamed = "".join(state.streamed_text).strip()
-            # Text before tool calls lives in blocks; only the trailing segment is
-            # the final answer. Falling back to ALL streamed text would duplicate it.
-            reply = state.final_text or state.trailing_text() or ("" if blocks else streamed)
-            new_session = state.session_id or session_id
-
-            # A stale --resume id makes the CLI exit with "No conversation found".
-            result = finalize_cli_turn(
-                proc=proc,
-                reply=reply,
-                streamed=bool(streamed) or bool(blocks),
-                blocks=blocks,
-                session_id=session_id,
-                new_session=new_session,
-                usage=state.usage,
-                agent_label="Claude Code",
-                timeout_s=timeout_s,
-                error_text=state.error_text,
-                stale_session_markers=("no conversation found",),
-            )
-            from .cli_update import is_cli_too_old_error, update_claude_cli
-
-            if result.ok or not is_cli_too_old_error(
-                result.error or "",
-                result.reply_text or "",
-                proc.stderr_tail,
-                proc.raw_tail,
-                state.error_text,
-            ):
-                return result
-            push(
-                {
+                if updated or cancelled() or not is_cli_too_old_error(
+                    result.error or "", result.reply_text or "", proc.stderr_tail, proc.raw_tail, state.error_text,
+                ):
+                    return result
+                if cancelled():
+                    return result
+                push({
                     "type": "status",
                     "text": "Claude Code CLI is too old for this model — updating automatically…",
-                    "conv_id": conv_id,
-                    "run_id": run_id,
-                }
-            )
-            upd = update_claude_cli(binary)
-            if not upd.get("ok"):
-                result.error = (
-                    (result.error or "")
-                    + "\n\nDucky tried to update Claude Code automatically and failed: "
-                    + str(upd.get("error") or "unknown")
-                )
-                return result
-            binary = resolve_claude_bin(cli_path) or str(upd.get("cli_path") or binary)
-            argv[0] = binary
-            state = _StreamState(conv_id, run_id, push)
-            proc = run_streaming_process(
-                argv=argv,
-                cwd=cwd,
-                env_extra=env,
-                conv_id=conv_id,
-                on_line=state.on_line,
-                timeout_s=timeout_s,
-                cancel=cancel,
-                stdin_data=full_prompt,
-            )
-            state.flush_stream()
-            state.finish_unresolved_tools(cancelled=proc.cancelled)
-            blocks = state.finalize_blocks()
-            streamed = "".join(state.streamed_text).strip()
-            reply = state.final_text or state.trailing_text() or ("" if blocks else streamed)
-            new_session = state.session_id or session_id
-            return finalize_cli_turn(
-                proc=proc,
-                reply=reply,
-                streamed=bool(streamed) or bool(blocks),
-                blocks=blocks,
-                session_id=session_id,
-                new_session=new_session,
-                usage=state.usage,
-                agent_label="Claude Code",
-                timeout_s=timeout_s,
-                error_text=state.error_text,
-                stale_session_markers=("no conversation found",),
-            )
+                    "conv_id": conv_id, "run_id": run_id,
+                })
+                if cancelled():
+                    return result
+                upd = update_claude_cli(binary)
+                if cancelled():
+                    return result
+                if not upd.get("ok"):
+                    result.error = (
+                        (result.error or "") + "\n\nDucky tried to update Claude Code automatically and failed: "
+                        + str(upd.get("error") or "unknown")
+                    )
+                    return result
+                binary = resolve_claude_bin(cli_path) or str(upd.get("cli_path") or binary)
+                if cancelled():
+                    return result
+                argv = [binary, *argv[1:]]
+                updated = True
         finally:
             if sys_path is not None:
                 try:
