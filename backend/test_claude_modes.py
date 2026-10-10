@@ -295,7 +295,8 @@ def registered_profile(launch, monkeypatch, historical_classes, helper, caps, re
             api = Mock()
             package.register(api)
             assert api.register_coding_agent.call_args.args == ("claude_code",)
-            agent = api.register_coding_agent.call_args.kwargs["factory"]()
+            launch.registration = api.register_coding_agent.call_args.kwargs
+            agent = launch.registration["factory"]()
             yield module, agent, result_type
     finally:
         for name in set(sys.modules) - set(before):
@@ -742,3 +743,32 @@ def test_cold_server_then_first_claude_tool(launch, monkeypatch, session):
     result = readiness.launch_with_ready_tools(a.ClaudeCodeAdapter(), **dict(launch.kwargs, session_id=session))
     assert result.ok and "mcp__uefn__ducky_get_plan" in json.dumps(result.blocks)
     assert any(e.get("type") == "tool_done" and e.get("success") for e in launch.events)
+
+
+def _permission_mode(launch) -> str:
+    argv = launch.calls[-1]["argv"]
+    return argv[argv.index("--permission-mode") + 1]
+
+
+def test_a_chat_that_asks_before_changes_sends_edits_to_the_approval_card(launch, monkeypatch):
+    from backend.tools.panel import permission_prompt as core
+    asked = []
+    monkeypatch.setattr(core, "claude_permission_mode",
+                        lambda conv_id, configured: asked.append((conv_id, configured)) or "default", raising=False)
+    assert launch.run(mode="agent").ok
+    assert _permission_mode(launch) == "default"
+    assert asked == [("test", "acceptEdits")]  # this chat, and the mode Settings holds
+    assert launch.run(mode="plan").ok
+    assert _permission_mode(launch) == "plan"  # Ask and Plan stay read-only whatever the chat allows
+
+
+def test_an_older_ducky_without_chat_modes_keeps_the_settings_mode(launch, monkeypatch):
+    from backend.tools.panel import permission_prompt as core
+    monkeypatch.delattr(core, "claude_permission_mode", raising=False)
+    assert launch.run(mode="agent").ok
+    assert _permission_mode(launch) == "acceptEdits"
+
+
+def test_registration_says_every_chat_approval_mode_works(launch, monkeypatch, historical_classes):
+    with registered_profile(launch, monkeypatch, historical_classes, True, True, "current"):
+        assert launch.registration["chat_permission_modes"] == ("ask", "edits", "all")

@@ -322,6 +322,9 @@ def register(api) -> None:
         token_provider="anthropic",
         login_status_ok="logged in",
         shows_thinking_effort=True,
+        # Every approval mode of a chat's permissions button works here: Ask before
+        # changes, Accept edits and Allow everything.
+        chat_permission_modes=("ask", "edits", "all"),
     )
     api.register_ide_hookup("claude", label="Claude")
     try:

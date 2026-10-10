@@ -123,6 +123,20 @@ def _core_has_permission_prompt() -> bool:
         return False
 
 
+def _chat_permission_mode(conv_id: str, configured: str) -> str:
+    """``--permission-mode`` from the chat's own approval mode (Ducky's permissions button):
+    "Ask before changes" sends file edits to the approval card too. A Ducky build without
+    per-chat modes keeps the mode from Settings."""
+    try:
+        from backend.tools.panel.permission_prompt import claude_permission_mode
+    except ImportError:
+        return configured
+    try:
+        return str(claude_permission_mode(conv_id, configured) or configured)
+    except Exception:
+        return configured
+
+
 # ── Model menu ───────────────────────────────────────────────────────────────
 # `claude --model` accepts family aliases (opus/sonnet/…) *or* concrete ids.
 # Live list: /v1/models when an API key is set, else Anthropic's public
@@ -1152,7 +1166,7 @@ class ClaudeCodeAdapter:
                 mcp_config_path=mcp_config_path,
                 extra_args=extra_args,
                 session_id=session_id,
-                permission_mode=str(cfg.get("permission_mode") or "acceptEdits"),
+                permission_mode=_chat_permission_mode(conv_id, str(cfg.get("permission_mode") or "acceptEdits")),
                 read_only=mode in ("ask", "plan"),
                 image_dirs=image_dirs,
             )
