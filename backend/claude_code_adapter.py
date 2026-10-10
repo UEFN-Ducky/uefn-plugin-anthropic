@@ -522,7 +522,10 @@ class _StreamState:
     so only one chip is shown at a time; the rest queue until theirs resolves.
     """
 
-    def __init__(self, conv_id: str, run_id: str, push: Callable[[dict[str, Any]], None]) -> None:
+    def __init__(self, conv_id: str, run_id: str, push: Callable[[dict[str, Any]], None], *, require_ducky: bool = False) -> None:
+        self.require_ducky = require_ducky
+        self.ducky_connected = False
+        self.ducky_connection_failed = False
         self.conv_id = conv_id
         self.run_id = run_id
         self.push = push
@@ -755,9 +758,18 @@ class _StreamState:
             subtype = str(data.get("subtype") or "")
             if subtype == "init":
                 model = str(data.get("model") or self.model or "").strip()
-                # Init reports session metadata, not guaranteed MCP readiness.
+                if self.require_ducky:
+                    servers = data.get("mcp_servers")
+                    self.ducky_connected = isinstance(servers, list) and any(
+                        isinstance(server, dict) and server.get("name") == "uefn"
+                        and server.get("status") == "connected" for server in servers
+                    )
+                    self.ducky_connection_failed |= not self.ducky_connected
+                # Only a connected uefn entry establishes this session's readiness.
                 text = f"Claude Code initialized · {model}" if model else "Claude Code initialized…"
                 self._emit({"type": "status", "text": text})
+            return
+        if self.require_ducky and (not self.ducky_connected or self.ducky_connection_failed) and kind != "result":
             return
         if kind == "stream_event":
             self._on_stream_event(data.get("event") or {})
@@ -1159,9 +1171,9 @@ class ClaudeCodeAdapter:
                     return previous_result if previous_result is not None else with_mode(_launch_result(
                         ok=False, status="cancelled", error="Cancelled", upstream_session_id=session_id,
                     ))
-                state = _StreamState(conv_id, run_id, push)
+                state = _StreamState(conv_id, run_id, push, require_ducky=True)
                 proc = run_streaming_process(
-                    argv=argv, cwd=cwd, env_extra=env, conv_id=conv_id,
+                    argv=argv, cwd=cwd, env_extra={**env, "MCP_TIMEOUT": "60000"}, conv_id=conv_id,
                     on_line=state.on_line, timeout_s=timeout_s, cancel=cancel,
                     stdin_data=stdin_payload,
                 )
@@ -1191,6 +1203,15 @@ class ClaudeCodeAdapter:
                     result.status = "error"
                     result.error = "Claude Code exited unsuccessfully. Partial output was retained; review it before retrying."
                     result.output_tail = ""
+                if not terminal and (state.ducky_connection_failed or (proc.returncode == 0 and not state.ducky_connected)):
+                    result.ok = False
+                    result.status = "error"
+                    result.error = "Ducky's tools didn't connect"
+                    result.reply_text = ""
+                    result.blocks = []
+                    result.streamed = False
+                    result.output_tail = ""
+                    return with_mode(result)
                 result = with_mode(result)
                 previous_result = result
                 if terminal or partial_failure or cancelled() or result.ok:

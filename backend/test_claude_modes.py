@@ -62,7 +62,12 @@ def launch(tmp_path, monkeypatch):
                                  update=update, resolver=resolver, process=process)
 
 
+def emit_init(kw):
+    kw["on_line"](json.dumps({"type": "system", "subtype": "init", "mcp_servers": [{"name": "uefn", "status": "connected"}]}))
+
+
 def emit_success(kw):
+    emit_init(kw)
     kw["on_line"](json.dumps({"type": "result", "subtype": "success", "result": "answer",
                              "session_id": "saved-session", "usage": {"output_tokens": 3}}))
 
@@ -169,7 +174,7 @@ def test_safe_fallback_chain_preserves_effective_payload(launch, monkeypatch, se
         assert argv[argv.index("--mcp-config") + 1] == launch.kwargs["mcp_config_path"]
         assert "--strict-mcp-config" in argv and "--permission-prompt-tool" in argv
         assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
-        assert c["env_extra"] == {"MOCK_ENV": "kept"}
+        assert c["env_extra"] == {"MOCK_ENV": "kept", "MCP_TIMEOUT": "60000"}
         assert ("--resume" in argv) == bool(session)
     assert result.ok
 
@@ -339,6 +344,7 @@ def test_terminal_on_each_later_attempt_retains_partial_blocks(launch, monkeypat
         index = len(launch.calls)
         if index < attempt:
             return ProcResult(returncode=1, stderr_tail=markers[index - 1])
+        emit_init(kw)
         kw["on_line"](json.dumps({"type": "assistant", "message": {"content": [
             {"type": "text", "text": "partial text"},
             {"type": "tool_use", "id": "read1", "name": "Read", "input": {"file_path": "mock"}},
@@ -409,7 +415,7 @@ def test_cancel_from_start_status_prevents_process(launch):
 def test_safe_error_only_json_repair_is_bounded(launch, monkeypatch):
     def process(**kw):
         launch.calls.append(kw)
-        kw["on_line"](json.dumps({"type": "system", "subtype": "init", "session_id": "prior-session"}))
+        kw["on_line"](json.dumps({"type": "system", "subtype": "init", "session_id": "prior-session", "mcp_servers": [{"name": "uefn", "status": "connected"}]}))
         kw["on_line"](json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
                                  "result": "does not support this model; claude update"}))
         return ProcResult(returncode=1)
@@ -446,6 +452,7 @@ def test_uncertain_result_evidence_prevents_classifier(launch, monkeypatch, evid
 @pytest.mark.parametrize("terminal", ["", "cancelled", "timed_out"])
 def test_nonzero_partial_is_failure_without_losing_content(launch, monkeypatch, session, content, terminal):
     def process(**kw):
+        emit_init(kw)
         launch.calls.append(kw)
         if content == "result":
             kw["on_line"](json.dumps({"type": "result", "result": "legitimate partial",
@@ -668,6 +675,7 @@ def test_read_only_turn_contract_has_zero_project_changes(launch, monkeypatch, t
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
     plans = []
     def cli_contract(**kw):
+        emit_init(kw)
         argv = kw["argv"]
         denied = argv[argv.index("--disallowedTools") + 1].split(",")
         assert "Write" in denied and argv[argv.index("--permission-mode") + 1] == "plan"
@@ -688,3 +696,49 @@ def test_read_only_turn_contract_has_zero_project_changes(launch, monkeypatch, t
     assert any(e.get("type") == "tool_done" and not e["success"]
                and "refused" in e["tool"]["result"] for e in launch.events)
     assert before == {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
+
+
+@pytest.mark.parametrize("session", ["", "prior-session"])
+@pytest.mark.parametrize("servers", [None, [], [{"name": "other", "status": "connected"}],
+                                      [{"name": "uefn", "status": "failed"}], "malformed", "no-init"])
+def test_missing_ducky_connection_cannot_answer(launch, monkeypatch, session, servers):
+    def process(**kw):
+        launch.calls.append(kw)
+        if servers != "no-init":
+            kw["on_line"](json.dumps({"type": "system", "subtype": "init", "mcp_servers": servers}))
+        kw["on_line"](json.dumps({"type": "stream_event", "event": {"type": "content_block_delta",
+                                     "delta": {"type": "text_delta", "text": "unavailable answer"}}}))
+        kw["on_line"](json.dumps({"type": "result", "result": "unavailable answer"}))
+        return ProcResult(returncode=0)
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    result = launch.run(session)
+    assert not result.ok and result.error == "Ducky's tools didn't connect"
+    assert not result.reply_text and not result.blocks and not result.streamed
+    assert not any(e.get("type") == "text_delta" for e in launch.events)
+    assert len(launch.calls) == 1
+    launch.update.assert_not_called()
+
+
+@pytest.mark.parametrize("session", ["", "prior-session"])
+def test_cold_server_then_first_claude_tool(launch, monkeypatch, session):
+    from backend.agent.coding_agents import readiness
+    from backend.bridge import shared_mcp
+    now = [0.0]
+    monkeypatch.setattr(readiness.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(readiness.time, "sleep", lambda n: now.__setitem__(0, now[0] + n))
+    monkeypatch.setattr(shared_mcp, "start_daemon_from_app", lambda: {"ok": True})
+    monkeypatch.setattr(shared_mcp, "_daemon_answers", lambda **kw: now[0] >= 8)
+    def process(**kw):
+        assert now[0] == 8
+        assert kw["env_extra"]["MCP_TIMEOUT"] == "60000"
+        emit_init(kw)
+        kw["on_line"](json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "first", "name": "mcp__uefn__ducky_get_plan", "input": {}}]}}))
+        kw["on_line"](json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "first", "content": "plan"}]}}))
+        emit_success(kw)
+        return ProcResult(returncode=0)
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    result = readiness.launch_with_ready_tools(a.ClaudeCodeAdapter(), **dict(launch.kwargs, session_id=session))
+    assert result.ok and "mcp__uefn__ducky_get_plan" in json.dumps(result.blocks)
+    assert any(e.get("type") == "tool_done" and e.get("success") for e in launch.events)

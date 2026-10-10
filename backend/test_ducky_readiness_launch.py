@@ -182,6 +182,7 @@ def test_valid_config_preserves_launch(tmp_path, monkeypatch, launch, session, s
     calls = []
     def run(**kwargs):
         calls.append(kwargs)
+        kwargs["on_line"](json.dumps({"type": "system", "subtype": "init", "mcp_servers": [{"name": "uefn", "status": "connected"}]}))
         kwargs["on_line"](json.dumps({"type": "result", "subtype": "success",
                                      "result": "mock answer", "session_id": "returned-session"}))
         return ProcResult(returncode=0)
