@@ -26,7 +26,7 @@ The app-owned shared daemon must remain outside disposable agent ownership.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation
 import json
 import ntpath
 
@@ -180,7 +180,14 @@ def _config(value):
         for key in ("env", "headers"):
             if key in server:
                 _pairs(server[key], environment=(key == "env"))
-    return json.dumps(_json(value), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    plain = _json(value)
+    try:
+        return json.dumps(plain, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    except ValueError:
+        # Plain JSON integers may exceed this interpreter's conversion limit.
+        # Keep that expected serialization failure inside the fixed boundary;
+        # never alter the interpreter limit or expose encoder diagnostics.
+        raise ProfileError("invalid") from None
 
 
 def _extras(value):
@@ -205,10 +212,12 @@ def _extras(value):
                 raise ProfileError("invalid")
         else:
             try:
-                budget = Decimal(val)
+                # Explicit private context: malformed conversion signals flags
+                # even when caught. Never borrow caller flags/traps/precision.
+                budget = Decimal(val, context=Context(traps=[InvalidOperation]))
             except InvalidOperation:
                 raise ProfileError("invalid") from None
-            if not budget.is_finite() or budget <= 0:
+            if not budget.is_finite() or budget.is_signed() or budget.is_zero():
                 raise ProfileError("invalid")
         mapped.append((flag[2:], val))
         i += 1

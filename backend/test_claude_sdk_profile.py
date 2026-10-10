@@ -4,6 +4,8 @@ from __future__ import annotations
 import ast
 import builtins
 import dataclasses
+import decimal
+import asyncio
 import importlib.util
 import json
 import os
@@ -273,6 +275,69 @@ def test_control_flow_identity_propagates(m, inputs, monkeypatch, kind):
     def interrupted(_value):
         raise signal
     monkeypatch.setattr(m, "_config", interrupted)
+    with pytest.raises(kind) as caught:
+        m.build_profile(inputs)
+    assert caught.value is signal
+
+
+@pytest.mark.parametrize("token,valid", [("2.500", True), ("1e-1000", True),
+    ("SYNTHETIC_PRIVATE", False), ("NaN", False), ("sNaN", False),
+    ("Infinity", False), ("-Infinity", False), ("0", False), ("-0", False)])
+@pytest.mark.parametrize("trapped", [False, True])
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_budget_preserves_caller_decimal_context(m, inputs, token, valid, trapped, preexisting):
+    inputs["extra_args"] = ["--max-budget-usd", token]
+    with decimal.localcontext() as ctx:
+        ctx.prec = 2
+        ctx.Emin, ctx.Emax = -9, 9
+        ctx.rounding = decimal.ROUND_DOWN
+        ctx.clear_flags()
+        ctx.traps[decimal.InvalidOperation] = trapped
+        ctx.flags[decimal.Inexact] = preexisting
+        ctx.flags[decimal.InvalidOperation] = preexisting
+        before = (dict(ctx.flags), dict(ctx.traps), ctx.prec, ctx.Emin, ctx.Emax,
+                  ctx.rounding, ctx.capitals, ctx.clamp)
+        if valid:
+            profile = m.build_profile(inputs)
+            assert dict(profile.options.extra_args)["max-budget-usd"] == token
+        else:
+            with pytest.raises(m.ProfileError) as caught:
+                m.build_profile(inputs)
+            assert "SYNTHETIC_PRIVATE" not in str(caught.value)
+        assert decimal.getcontext() is ctx
+        assert before == (dict(ctx.flags), dict(ctx.traps), ctx.prec, ctx.Emin, ctx.Emax,
+                          ctx.rounding, ctx.capitals, ctx.clamp)
+
+
+@pytest.mark.parametrize("sign", [-1, 1])
+@pytest.mark.parametrize("nested", [False, True])
+def test_large_config_integer_has_structured_boundary(m, inputs, sign, nested):
+    value = sign * 10**5000
+    inputs["mcp_config"]["mcpServers"]["uefn"]["extension"] = {"items": [value]} if nested else value
+    before = sys.get_int_max_str_digits()
+    with pytest.raises(m.ProfileError) as caught:
+        m.build_profile(inputs)
+    assert str(caught.value).startswith("Ducky tools unavailable:")
+    assert sys.get_int_max_str_digits() == before
+
+
+def test_normal_config_integers_and_booleans_preserved(m, inputs):
+    inputs["mcp_config"]["mcpServers"]["uefn"]["extension"] = [0, -123, 10**100, True, False]
+    profile = m.build_profile(inputs)
+    assert json.loads(profile.config_snapshot) == inputs["mcp_config"]
+
+
+@pytest.mark.parametrize("phase", ["decimal", "json"])
+@pytest.mark.parametrize("kind", [KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError])
+def test_numeric_boundaries_preserve_control_flow(m, inputs, monkeypatch, phase, kind):
+    signal = kind("synthetic control")
+    def interrupted(*args, **kwargs):
+        raise signal
+    inputs["extra_args"] = ["--max-budget-usd=2.5"]
+    if phase == "decimal":
+        monkeypatch.setattr(m, "Decimal", interrupted)
+    else:
+        monkeypatch.setattr(m.json, "dumps", interrupted)
     with pytest.raises(kind) as caught:
         m.build_profile(inputs)
     assert caught.value is signal
