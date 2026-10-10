@@ -93,7 +93,7 @@ def test_restricted_invalid_refusal_precedes_all_setup(launch, monkeypatch, sess
     result = launch.run(session, mode=mode)
     assert not result.ok and result.status == "error"
     assert result.upstream_session_id == session and not result.effective_mode
-    assert result.requested_mode == (mode.strip().lower() if isinstance(mode, str) else str(mode))
+    assert result.requested_mode == (mode.strip().lower() if isinstance(mode, str) and mode.strip().lower() in ("ask", "plan") else "")
     assert not launch.calls and not launch.events
     launch.update.assert_not_called()
 
@@ -439,3 +439,126 @@ def test_uncertain_result_evidence_prevents_classifier(launch, monkeypatch, evid
     assert not result.ok and len(launch.calls) == 1
     classify.assert_not_called()
     launch.update.assert_not_called()
+
+
+@pytest.mark.parametrize("session", ["", "prior-session"])
+@pytest.mark.parametrize("content", ["assistant", "result", "tool"])
+@pytest.mark.parametrize("terminal", ["", "cancelled", "timed_out"])
+def test_nonzero_partial_is_failure_without_losing_content(launch, monkeypatch, session, content, terminal):
+    def process(**kw):
+        launch.calls.append(kw)
+        if content == "result":
+            kw["on_line"](json.dumps({"type": "result", "result": "legitimate partial",
+                "session_id": "kept", "usage": {"output_tokens": 2}}))
+        else:
+            parts = [{"type": "text", "text": "legitimate partial"}]
+            if content == "tool":
+                parts.append({"type": "tool_use", "id": "partial-tool", "name": "Read", "input": {}})
+            kw["on_line"](json.dumps({"type": "assistant", "session_id": "kept", "message": {"content": parts}}))
+        return ProcResult(returncode=1, stderr_tail="PRIVATE_SYNTHETIC does not support this model; claude update",
+                          raw_tail="PRIVATE_SYNTHETIC", **({terminal: True} if terminal else {}))
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    classifier = Mock(side_effect=AssertionError("partial work classifier"))
+    monkeypatch.setattr(updater, "is_cli_too_old_error", classifier)
+    result = launch.run(session)
+    assert not result.ok and result.status == ({"cancelled": "cancelled", "timed_out": "timeout"}.get(terminal, "error"))
+    assert result.upstream_session_id == "kept"
+    assert "legitimate partial" in result.reply_text + json.dumps(result.blocks)
+    if content == "tool":
+        assert "partial-tool" in json.dumps(result.blocks)
+    if content == "result":
+        assert result.usage["output_tokens"] == 2
+    assert result.requested_mode == "agent" and result.effective_mode == ""
+    assert "PRIVATE_SYNTHETIC" not in json.dumps(result.to_dict()) + json.dumps(launch.events)
+    if not terminal:
+        assert result.error == "Claude Code exited unsuccessfully. Partial output was retained; review it before retrying."
+        assert result.output_tail == ""
+    assert len(launch.calls) == 1
+    classifier.assert_not_called()
+    launch.update.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", [{}, False, " PRIVATE_SYNTHETIC "])
+@pytest.mark.parametrize("session", ["", "prior-session"])
+def test_invalid_mode_never_serializes_raw_value(launch, monkeypatch, mode, session):
+    for name in ("_valid_ducky_mcp_config", "resolve_claude_bin", "coding_agent_cfg", "run_streaming_process"):
+        monkeypatch.setattr(a, name, Mock(side_effect=AssertionError("invalid mode setup")))
+    result = launch.run(session, mode=mode)
+    assert not result.ok and result.status == "error"
+    assert result.requested_mode == result.effective_mode == ""
+    assert result.error == "Invalid Claude Code Ducky mode." and result.upstream_session_id == session
+    assert "PRIVATE_SYNTHETIC" not in json.dumps(result.to_dict()) + json.dumps(launch.events)
+    assert not launch.events and not launch.calls
+    launch.update.assert_not_called()
+
+
+MODEL_WORK = [
+    {"inputTokens": 10}, {"outputTokens": 3}, {"costUSD": 0.1},
+    {"input_tokens": 10}, {"output_tokens": 3}, {"cost_usd": 0.1},
+    {"cacheReadInputTokens": 2}, {"cacheCreationInputTokens": 2},
+    {"cache_read_input_tokens": 2}, {"cache_creation_input_tokens": 2},
+    {"numTurns": 1}, {"num_turns": 1}, {"webSearchRequests": 1},
+    {"usage": {"input_tokens": 10}}, {"future_work_metric": 3},
+    {"inputTokens": "10"}, ["uncertain activity"], "uncertain activity",
+]
+
+
+@pytest.mark.parametrize("container", ["modelUsage", "model_usage"])
+@pytest.mark.parametrize("entry", MODEL_WORK)
+@pytest.mark.parametrize("session", ["", "prior-session"])
+def test_per_model_work_stops_before_classifier(launch, monkeypatch, container, entry, session):
+    def process(**kw):
+        launch.calls.append(kw)
+        kw["on_line"](json.dumps({"type": "result", "is_error": True,
+            "session_id": "kept", "result": "does not support this model; claude update",
+            container: {"sonnet": entry}}))
+        return ProcResult(returncode=1)
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    classifier = Mock(side_effect=AssertionError("per-model work classifier"))
+    monkeypatch.setattr(updater, "is_cli_too_old_error", classifier)
+    result = launch.run(session)
+    assert not result.ok and result.effective_mode == "" and result.upstream_session_id == "kept"
+    assert result.usage["input_tokens"] == result.usage["output_tokens"] == 0  # No invented totals.
+    assert len(launch.calls) == 1
+    classifier.assert_not_called()
+    launch.update.assert_not_called()
+
+
+@pytest.mark.parametrize("first", [
+    {"usage": {"input_tokens": 10}},
+    {"modelUsage": {"sonnet": {"inputTokens": 10}}, "model_usage": {}},
+    {"modelUsage": {}, "model_usage": {"sonnet": {"input_tokens": 10}}},
+    {"modelUsage": [{"inputTokens": 10}]},
+])
+def test_work_evidence_survives_later_empty_result(launch, monkeypatch, first):
+    def process(**kw):
+        launch.calls.append(kw)
+        for evidence in (first, {}):
+            kw["on_line"](json.dumps({"type": "result", "is_error": True,
+                "result": "does not support this model; claude update", **evidence}))
+        return ProcResult(returncode=1)
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    classifier = Mock(side_effect=AssertionError("lost prior work evidence"))
+    monkeypatch.setattr(updater, "is_cli_too_old_error", classifier)
+    assert not launch.run().ok
+    assert len(launch.calls) == 1
+    classifier.assert_not_called()
+    launch.update.assert_not_called()
+
+
+@pytest.mark.parametrize("container", ["modelUsage", "model_usage"])
+def test_zero_model_usage_allows_bounded_prework_repair(launch, monkeypatch, container):
+    def process(**kw):
+        launch.calls.append(kw)
+        if len(launch.calls) == 1:
+            kw["on_line"](json.dumps({"type": "result", "is_error": True,
+                "result": "does not support this model; claude update",
+                container: {"sonnet": {"inputTokens": 0, "outputTokens": 0, "costUSD": 0,
+                                       "contextWindow": 200000, "maxOutputTokens": 64000}}}))
+            return ProcResult(returncode=1)
+        emit_success(kw)
+        return ProcResult(returncode=0)
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    result = launch.run()
+    assert result.ok and result.effective_mode == "agent"
+    assert len(launch.calls) == 2 and launch.update.call_count == 1

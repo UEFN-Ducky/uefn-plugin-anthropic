@@ -885,6 +885,9 @@ class _StreamState:
 
     def _on_result(self, data: dict[str, Any]) -> None:
         self.flush_stream()
+        # Retry evidence is sticky and separate from displayed usage totals.
+        # Inspect both vendor spellings, even when one container is empty.
+        self.saw_work = self.saw_work or self._result_has_work(data)
         subtype = str(data.get("subtype") or "")
         self.is_error = bool(data.get("is_error")) or subtype.startswith("error")
         text = data.get("result")
@@ -925,6 +928,36 @@ class _StreamState:
         if limit is not None:
             payload["context_limit"] = limit
         self.usage = payload
+
+    @staticmethod
+    def _result_has_work(data: dict[str, Any]) -> bool:
+        """Conservative, fixed-depth inspection; never synthesize billing totals."""
+        limits = {"contextWindow", "context_window", "maxOutputTokens", "max_output_tokens"}
+
+        def nonzero(value: Any) -> bool:
+            if isinstance(value, str):
+                return value.strip() not in ("", "0", "0.0")
+            return bool(value)
+
+        def record_has_work(record: Any) -> bool:
+            if not isinstance(record, dict):
+                return nonzero(record)
+            # Unknown nonempty counters/shapes mean uncertain work. Do not
+            # recurse into arbitrary payloads or mistake capacity for usage.
+            return any(nonzero(value) for key, value in record.items() if key not in limits)
+
+        if record_has_work(data.get("usage")) or any(nonzero(data.get(key)) for key in (
+            "num_turns", "numTurns", "total_cost_usd", "costUSD", "cost_usd",
+        )):
+            return True
+        for key in ("modelUsage", "model_usage"):
+            models = data.get(key)
+            if isinstance(models, dict):
+                if any(record_has_work(record) for record in models.values()):
+                    return True
+            elif nonzero(models):
+                return True
+        return False
 
 
 class ClaudeCodeAdapter:
@@ -1005,7 +1038,7 @@ class ClaudeCodeAdapter:
         except ValueError:
             return _launch_result(
                 ok=False, status="error", error="Invalid Claude Code Ducky mode.",
-                upstream_session_id=session_id, requested_mode=str(mode).strip().lower(), effective_mode="",
+                upstream_session_id=session_id, requested_mode="", effective_mode="",
             )
         if mode != "agent":
             return _launch_result(
@@ -1123,10 +1156,20 @@ class ClaudeCodeAdapter:
                 # Older shared finalizers omit usage on terminal/error outcomes.
                 if state.usage and not result.usage:
                     result.usage = state.usage
+                terminal = proc.cancelled or proc.timed_out or result.status in ("cancelled", "timeout")
+                partial_failure = proc.returncode != 0 and not terminal and (
+                    result.ok or blocks or streamed or (reply and not state.error_text)
+                )
+                if partial_failure:
+                    # The shared legacy finalizer permits nonzero exits with a
+                    # reply. Claude partial output does not prove completion.
+                    result.ok = False
+                    result.status = "error"
+                    result.error = "Claude Code exited unsuccessfully. Partial output was retained; review it before retrying."
+                    result.output_tail = ""
                 result = with_mode(result)
                 previous_result = result
-                if (proc.cancelled or proc.timed_out or result.status in ("cancelled", "timeout")
-                        or cancelled() or result.ok):
+                if terminal or partial_failure or cancelled() or result.ok:
                     return result
                 # Streamed work, tokens or opaque stdout make replay uncertain.
                 used_tokens = any(state.usage.get(k) for k in (
