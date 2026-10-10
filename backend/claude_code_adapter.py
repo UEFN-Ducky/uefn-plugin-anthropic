@@ -410,6 +410,7 @@ def build_claude_argv(
     image_dirs: list[str] | None = None,
     system_prompt_file: str = "",
     prompt_via_stdin: bool = False,
+    read_only: bool = False,
 ) -> list[str]:
     """Argv for one streaming turn (unit-testable, no side effects).
 
@@ -423,8 +424,10 @@ def build_claude_argv(
         argv.extend(["--allowedTools", "mcp__uefn"])
         if _core_has_permission_prompt():
             argv.extend(["--permission-prompt-tool", _PERMISSION_PROMPT_TOOL])
-    mode = permission_mode if permission_mode in _PERMISSION_MODES else "acceptEdits"
+    mode = "plan" if read_only else (permission_mode if permission_mode in _PERMISSION_MODES else "acceptEdits")
     argv.extend(["--permission-mode", mode])
+    if read_only:
+        argv.extend(["--disallowedTools", "Edit,Write,NotebookEdit,Bash,ExitPlanMode"])
     # Attachment folders and every added project except cwd. Claude Code has no
     # --image flag; --add-dir is how its Read tool opens those paths.
     for directory in image_dirs or []:
@@ -444,7 +447,7 @@ def build_claude_argv(
     else:
         raise ValueError("Claude Code requires a model alias or id")
     extra = (extra_args or "").strip()
-    if extra:
+    if extra and not read_only:
         argv.extend(shlex.split(extra, posix=False))
     # Long user prompts must ride stdin (prompt_via_stdin), not argv.
     if not prompt_via_stdin:
@@ -987,7 +990,7 @@ class ClaudeCodeAdapter:
         needs_api_key=False,
         needs_cli=True,
         resume=True,
-        **({"supported_modes": ("agent",)} if "supported_modes" in _CAPABILITY_PARAMETERS else {}),
+        **({"supported_modes": ("agent", "ask", "plan")} if "supported_modes" in _CAPABILITY_PARAMETERS else {}),
     )
 
     def detect(self, settings: Any) -> CodingAgentInfo:
@@ -1056,11 +1059,6 @@ class ClaudeCodeAdapter:
                 ok=False, status="error", error="Invalid Claude Code Ducky mode.",
                 upstream_session_id=session_id, requested_mode="", effective_mode="",
             )
-        if mode != "agent":
-            return _launch_result(
-                ok=False, status="error", error="Claude Code does not support Ducky Ask/Plan yet.",
-                upstream_session_id=session_id, requested_mode=mode, effective_mode="",
-            )
         original_push = push
 
         def push(event: dict[str, Any]) -> None:
@@ -1112,6 +1110,15 @@ class ClaudeCodeAdapter:
         cfg = coding_agent_cfg(PanelSettings.load(), self.id)
         images = list(image_paths or [])
         full_prompt = prompt + _image_prompt_suffix(images)
+        if mode in ("ask", "plan"):
+            instruction = (
+                "Ducky Ask mode: answer the question using read-only tools. Do not change files."
+                if mode == "ask" else
+                "Ducky Plan mode: inspect using read-only tools, then create or update the plan "
+                "with Ducky's ducky_create_plan / ducky_plan_update_node tools. "
+                "Do not write a local plan file or implement the plan."
+            )
+            full_prompt = instruction + "\n\n" + full_prompt
         image_dirs = _with_chat_captures(claude_extra_dirs(cwd, images), conv_id)
 
         # System prompt + user paste must NOT go on Windows argv/env (WinError 206).
@@ -1134,6 +1141,7 @@ class ClaudeCodeAdapter:
                 extra_args=extra_args,
                 session_id=session_id,
                 permission_mode=str(cfg.get("permission_mode") or "acceptEdits"),
+                read_only=mode in ("ask", "plan"),
                 image_dirs=image_dirs,
             )
             push({

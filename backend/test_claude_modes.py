@@ -1,4 +1,4 @@
-"""Agent-only Ducky contract and no-replay boundaries; no live CLI/provider."""
+"""Ducky mode contract and no-replay boundaries; no live CLI/provider."""
 from __future__ import annotations
 
 import ast
@@ -78,11 +78,11 @@ def test_agent_mode_success_and_stream_metadata(launch, session, mode):
     argv = launch.calls[0]["argv"]
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
     assert ("--resume" in argv) == bool(session)
-    assert a.ClaudeCodeAdapter.capabilities.supported_modes == ("agent",)
+    assert a.ClaudeCodeAdapter.capabilities.supported_modes == ("agent", "ask", "plan")
 
 
 @pytest.mark.parametrize("session", ["", "prior-session"])
-@pytest.mark.parametrize("mode", ["ask", " Plan ", "invalid", 42])
+@pytest.mark.parametrize("mode", ["invalid", 42])
 def test_restricted_invalid_refusal_precedes_all_setup(launch, monkeypatch, session, mode):
     def forbidden(*args, **kwargs):
         raise AssertionError("mode refusal must precede setup")
@@ -98,14 +98,14 @@ def test_restricted_invalid_refusal_precedes_all_setup(launch, monkeypatch, sess
     launch.update.assert_not_called()
 
 
-def test_same_session_mode_switches_remain_agent_only(launch):
+def test_same_session_mode_switches_apply_current_mode(launch):
     for mode in ("agent", "ask", "plan", "agent", "plan", "ask"):
         before = len(launch.calls)
         result = launch.run("prior-session", mode=mode)
-        assert result.ok == (mode == "agent")
-        assert len(launch.calls) - before == int(mode == "agent")
+        assert result.ok
+        assert len(launch.calls) - before == 1
         assert result.requested_mode == mode
-        assert result.effective_mode == ("agent" if result.ok else "")
+        assert result.effective_mode == mode
 
 
 @pytest.mark.parametrize("session", ["", "prior-session"])
@@ -314,12 +314,12 @@ def test_historical_actual_host_registration_and_agent(launch, monkeypatch, hist
         for name in ("requested_mode", "effective_mode"):
             if name in parameters:
                 assert getattr(result, name) == "agent"
-        assert getattr(agent.capabilities, "supported_modes", ("agent",)) == ("agent",)
+        assert getattr(agent.capabilities, "supported_modes", ("agent", "ask", "plan")) == ("agent", "ask", "plan")
         before = len(launch.calls)
         for mode in ("ask", "plan"):
             failure = agent.launch(**launch.kwargs, session_id=session, mode=mode)
-            assert type(failure) is result_type and not failure.ok
-        assert len(launch.calls) == before
+            assert type(failure) is result_type and failure.ok
+        assert len(launch.calls) == before + 2
 
 
 def test_mandatory_import_error_is_not_hidden(launch, monkeypatch, historical_classes):
@@ -382,7 +382,7 @@ def test_unrelated_result_constructor_error_remains_visible(launch, monkeypatch)
         raise TypeError("unrelated constructor defect")
     monkeypatch.setattr(a, "CodingAgentLaunchResult", broken)
     with pytest.raises(TypeError, match="unrelated constructor defect"):
-        launch.run(mode="ask")
+        launch.run(mode="invalid")
 
 
 @pytest.mark.parametrize("marker", ["unknown option --append-system-prompt-file", "unknown option --include-partial-messages"])
@@ -638,3 +638,53 @@ def test_invalid_mode_is_never_stringified(launch):
     assert not launch.calls and not launch.events
     launch.resolver.assert_not_called()
     launch.update.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["ask", "plan"])
+@pytest.mark.parametrize("session", ["", "prior-session"])
+def test_read_only_modes_override_saved_permissions_and_extra_args(launch, monkeypatch, mode, session):
+    monkeypatch.setattr(a, "coding_agent_cfg", lambda *_: {"permission_mode": "bypassPermissions"})
+    result = launch.run(session, mode=mode,
+        extra_args="--permission-mode bypassPermissions --dangerously-skip-permissions --allowedTools Write")
+    assert result.ok and result.reply_text == "answer"
+    assert result.requested_mode == result.effective_mode == mode
+    argv = launch.calls[0]["argv"]
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert argv.count("--permission-mode") == 1
+    assert "--dangerously-skip-permissions" not in argv
+    assert set(argv[argv.index("--disallowedTools") + 1].split(",")) >= {
+        "Edit", "Write", "NotebookEdit", "Bash", "ExitPlanMode"}
+    assert "Do not" in launch.calls[0]["stdin_data"]
+    if mode == "plan":
+        assert "ducky_create_plan" in launch.calls[0]["stdin_data"]
+        assert "ducky_plan_update_node" in launch.calls[0]["stdin_data"]
+    assert ("--resume" in argv) == bool(session)
+
+
+@pytest.mark.parametrize("mode", ["ask", "plan"])
+def test_read_only_turn_contract_has_zero_project_changes(launch, monkeypatch, tmp_path, mode):
+    target = tmp_path / "project.txt"
+    target.write_text("original", encoding="utf-8")
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
+    plans = []
+    def cli_contract(**kw):
+        argv = kw["argv"]
+        denied = argv[argv.index("--disallowedTools") + 1].split(",")
+        assert "Write" in denied and argv[argv.index("--permission-mode") + 1] == "plan"
+        kw["on_line"](json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "attempt", "name": "Write", "input": {"file_path": str(target)}}]}}))
+        kw["on_line"](json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "attempt", "is_error": True,
+             "content": "Write refused: tool is disallowed in plan permission mode"}]}}))
+        if mode == "plan":
+            assert "ducky_create_plan" in kw["stdin_data"]
+            plans.append({"nodes": [{"content": "Inspect then implement"}]})
+        emit_success(kw)
+        return ProcResult(returncode=0)
+    monkeypatch.setattr(a, "run_streaming_process", cli_contract)
+    result = launch.run(mode=mode)
+    assert result.ok
+    assert bool(plans) == (mode == "plan")
+    assert any(e.get("type") == "tool_done" and not e["success"]
+               and "refused" in e["tool"]["result"] for e in launch.events)
+    assert before == {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
