@@ -186,6 +186,34 @@ def test_cancel_without_session_is_ok():
     assert out["cancelled"] is True
 
 
+def _answers(monkeypatch, *answers):
+    import claude_auth
+
+    queue = list(answers)
+    monkeypatch.setattr(claude_auth, "claude_auth_status", lambda cli_path="": queue.pop(0))
+    return claude_auth.claude_definitely_logged_out
+
+
+def test_only_a_clear_logged_out_answer_stops_a_turn(monkeypatch):
+    # Oct 10 2026 live team run: a logged-in Claude Code chat was stopped with
+    # "Claude Code login required" by one failed status check.
+    assert not _answers(monkeypatch, {"loggedIn": False, "error": "timed out"})(retry_after_s=0)
+    assert not _answers(monkeypatch, {"loggedIn": False}, {"loggedIn": True})(retry_after_s=0)
+    assert not _answers(monkeypatch, {"loggedIn": True})(retry_after_s=0)
+    assert _answers(monkeypatch, {"loggedIn": False}, {"loggedIn": False})(retry_after_s=0)
+
+
+def test_auth_status_reads_json_with_text_around_it(monkeypatch):
+    import subprocess
+
+    import claude_auth
+
+    noisy = 'Update available: 2.1.300\n{"loggedIn": true, "authMethod": "claude.ai"}\n'
+    monkeypatch.setattr(claude_auth, "resolve_claude_bin", lambda override="": "claude.exe")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, noisy, ""))
+    assert claude_auth.claude_auth_status()["loggedIn"] is True
+
+
 if __name__ == "__main__":
     test_url_is_clean_of_ansi()
     test_code_hash_state_is_a_code()

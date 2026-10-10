@@ -133,10 +133,10 @@ def _before_launch(
     **_kw: Any,
 ) -> dict[str, Any] | None:
     from .claude_auth import (
+        claude_definitely_logged_out,
         clear_pending_auth,
         continue_claude_login,
         get_pending_auth,
-        is_claude_logged_in,
         prompt_claude_login_in_settings,
     )
 
@@ -176,7 +176,7 @@ def _before_launch(
             else ("done" if outcome.get("ok") else "error"),
         )
 
-    if is_claude_logged_in(cli_path):
+    if not claude_definitely_logged_out(cli_path):
         return None
 
     started = prompt_claude_login_in_settings(

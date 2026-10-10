@@ -91,7 +91,9 @@ def claude_auth_status(cli_path: str = "") -> dict[str, Any]:
         text = (proc.stdout or proc.stderr or "").strip()
         if not text:
             return {"loggedIn": False, "error": "empty auth status"}
-        data = json.loads(text)
+        # An update notice or warning printed around the JSON is not a logout.
+        start, end = text.find("{"), text.rfind("}")
+        data = json.loads(text[start:end + 1] if 0 <= start < end else text)
         if isinstance(data, dict):
             return data
     except Exception as exc:
@@ -101,6 +103,22 @@ def claude_auth_status(cli_path: str = "") -> dict[str, Any]:
 
 def is_claude_logged_in(cli_path: str = "") -> bool:
     return bool(claude_auth_status(cli_path).get("loggedIn"))
+
+
+def claude_definitely_logged_out(cli_path: str = "", *, retry_after_s: float = 1.0) -> bool:
+    """Gate before a chat turn: True only when the CLI itself answers loggedIn false, twice.
+
+    A status check that fails (CLI busy, timed out, garbled output) used to read as a
+    logout and stopped a turn with "Claude Code login required" while Claude Code was
+    logged in. Then the turn starts; a real logout still fails it and opens the login.
+    """
+    for attempt in range(2):
+        status = claude_auth_status(cli_path)
+        if status.get("loggedIn") is not False or status.get("error"):
+            return False
+        if attempt == 0 and retry_after_s > 0:
+            time.sleep(retry_after_s)
+    return True
 
 
 def _logout_argv(binary: str) -> list[str]:
