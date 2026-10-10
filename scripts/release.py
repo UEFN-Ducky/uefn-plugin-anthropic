@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -91,45 +92,52 @@ def mcp_call(base_url: str, api_key: str, name: str, arguments: dict) -> dict:
     return result if isinstance(result, dict) else {"ok": True, "result": result}
 
 
-def upload_zip_file(base_url: str, api_key: str, zip_path: Path) -> dict:
-    """Multipart upload via API-key app-release route (MCP JSON bodies capped at 64KB)."""
-    boundary = "----DuckyPluginZipBoundary7MA4YWxkTrZu0gW"
-    file_bytes = zip_path.read_bytes()
-    filename = zip_path.name
-    body = b"".join(
-        [
-            f"--{boundary}\r\n".encode(),
-            (
-                f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-                "Content-Type: application/zip\r\n\r\n"
-            ).encode(),
-            file_bytes,
-            b"\r\n",
-            f"--{boundary}--\r\n".encode(),
-        ]
+def _unwrap(result: dict, key: str) -> dict:
+    """The dict holding ``key`` in a tool result (the host may nest ``payload``)."""
+    node = result
+    for _ in range(4):
+        if not isinstance(node, dict) or key in node:
+            break
+        node = node.get("payload")
+    return node if isinstance(node, dict) else {}
+
+
+def upload_with_ticket(base_url: str, api_key: str, zip_path: Path) -> str:
+    """Upload the zip straight to the Store's storage and return its uploadId.
+
+    ``uds_upload_ticket`` hands out a presigned PUT with the size signed; ``uds_release``
+    then names the upload by id. (The old /api/files/app-release route is gone, and MCP
+    bodies stop at 64 KB.)
+    """
+    data = zip_path.read_bytes()
+    ticket = _unwrap(
+        mcp_call(
+            base_url,
+            api_key,
+            "uds_upload_ticket",
+            {"size": len(data), "sha256": hashlib.sha256(data).hexdigest(), "purpose": "release"},
+        ),
+        "uploadId",
     )
-    url = base_url.rstrip("/") + "/api/files/app-release"
+    upload_id = str(ticket.get("uploadId") or "").strip()
+    put_url = str(ticket.get("putUrl") or "").strip()
+    if not upload_id or not put_url:
+        raise SystemExit(f"Upload ticket failed: {ticket}")
     req = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "Accept": "application/json",
-            "User-Agent": "UEFN-Ducky-PluginRelease/1.0",
-            "Origin": base_url.rstrip("/"),
-        },
-        method="POST",
+        put_url,
+        data=data,
+        method="PUT",
+        headers={"Content-Length": str(len(data)), "User-Agent": "UEFN-Ducky-PluginRelease/1.0"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            resp.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"Upload HTTP {exc.code}: {detail}") from exc
-    if not isinstance(payload, dict) or not payload.get("ok"):
-        raise SystemExit(f"Upload failed: {payload}")
-    return payload
+        raise SystemExit(f"Upload PUT HTTP {exc.code}: {detail}") from exc
+    except (OSError, urllib.error.URLError) as exc:
+        raise SystemExit(f"Upload PUT failed: {exc}") from exc
+    return upload_id
 
 
 def publish(zip_path: Path, *, category: str, changelog: str) -> None:
@@ -159,14 +167,8 @@ def publish(zip_path: Path, *, category: str, changelog: str) -> None:
     mcp_call(base, key, "uds_ensure_category", {"name": "Gateways", "slug": "gateways"})
     print(f"ensuring install category {category!r}…")
     mcp_call(base, key, "uds_ensure_category", {"name": category.title(), "slug": category})
-    # ponytail: MCP wire max body 64KB — upload zip then pass zipFileId (not zipB64).
-    print(f"uploading {zip_path.name} via /api/files/app-release…")
-    uploaded = upload_zip_file(base, key, zip_path)
-    file_meta = uploaded.get("file") if isinstance(uploaded.get("file"), dict) else {}
-    file_id = str(file_meta.get("id") or uploaded.get("id") or "").strip()
-    zip_url = str(uploaded.get("url") or "").strip()
-    if not file_id and not zip_url:
-        raise SystemExit(f"Upload missing file id/url: {uploaded}")
+    print(f"uploading {zip_path.name} ({zip_path.stat().st_size} bytes) with an upload ticket…")
+    upload_id = upload_with_ticket(base, key, zip_path)
     release_args: dict = {
         "category": category,
         "changelog": changelog or "v1: Anthropic API key + Claude Code for Settings → LLMs",
@@ -180,11 +182,8 @@ def publish(zip_path: Path, *, category: str, changelog: str) -> None:
             "(Detect runs on install)."
         ),
     }
-    if file_id:
-        release_args["zipFileId"] = file_id
-    else:
-        release_args["zipUrl"] = zip_url
-    print(f"releasing via uds_release ({'zipFileId=' + file_id if file_id else 'zipUrl'})…")
+    release_args["uploadId"] = upload_id
+    print(f"releasing via uds_release (uploadId={upload_id})…")
     result = mcp_call(base, key, "uds_release", release_args)
     print(json.dumps(result, indent=2))
     if result.get("ok") is False or result.get("error"):
