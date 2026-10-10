@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 import os
 import re
 import shlex
@@ -867,27 +868,39 @@ class _StreamState:
             self._last_step_context_tokens = window
 
     @staticmethod
+    def _valid_capacity(value: Any) -> bool:
+        """Only nonnegative integral JSON numbers are known capacity metadata.
+
+        Do not coerce strings, booleans or compound values: an unfamiliar shape
+        is uncertainty about work, even under a familiar capacity key.
+        """
+        if type(value) is int:
+            return value >= 0
+        return (type(value) is float and math.isfinite(value)
+                and value >= 0 and value.is_integer())
+
+    @staticmethod
     def _context_limit_from_result(data: dict[str, Any]) -> int | None:
         """Pull contextWindow from result.modelUsage / model_usage when present."""
-        model_usage = data.get("modelUsage")
-        if not isinstance(model_usage, dict):
-            model_usage = data.get("model_usage")
-        if not isinstance(model_usage, dict) or not model_usage:
-            return None
         best = 0
-        for entry in model_usage.values():
-            if not isinstance(entry, dict):
+        for container in ("modelUsage", "model_usage"):
+            model_usage = data.get(container)
+            if not isinstance(model_usage, dict):
                 continue
-            n = int(entry.get("contextWindow") or entry.get("context_window") or 0)
-            if n > best:
-                best = n
+            for entry in model_usage.values():
+                if not isinstance(entry, dict):
+                    continue
+                for key in ("contextWindow", "context_window"):
+                    value = entry.get(key)
+                    if _StreamState._valid_capacity(value):
+                        best = max(best, int(value))
         return best or None
 
     def _on_result(self, data: dict[str, Any]) -> None:
-        self.flush_stream()
         # Retry evidence is sticky and separate from displayed usage totals.
-        # Inspect both vendor spellings, even when one container is empty.
+        # Retain it before presentation or parsing can fail in the callback.
         self.saw_work = self.saw_work or self._result_has_work(data)
+        self.flush_stream()
         subtype = str(data.get("subtype") or "")
         self.is_error = bool(data.get("is_error")) or subtype.startswith("error")
         text = data.get("result")
@@ -944,7 +957,10 @@ class _StreamState:
                 return nonzero(record)
             # Unknown nonempty counters/shapes mean uncertain work. Do not
             # recurse into arbitrary payloads or mistake capacity for usage.
-            return any(nonzero(value) for key, value in record.items() if key not in limits)
+            return any(
+                not _StreamState._valid_capacity(value) if key in limits else nonzero(value)
+                for key, value in record.items()
+            )
 
         if record_has_work(data.get("usage")) or any(nonzero(data.get(key)) for key in (
             "num_turns", "numTurns", "total_cost_usd", "costUSD", "cost_usd",

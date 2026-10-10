@@ -562,3 +562,79 @@ def test_zero_model_usage_allows_bounded_prework_repair(launch, monkeypatch, con
     result = launch.run()
     assert result.ok and result.effective_mode == "agent"
     assert len(launch.calls) == 2 and launch.update.call_count == 1
+
+
+CAPACITY_KEYS = ["contextWindow", "context_window", "maxOutputTokens", "max_output_tokens"]
+
+
+@pytest.mark.parametrize("container", ["modelUsage", "model_usage"])
+@pytest.mark.parametrize("key", CAPACITY_KEYS)
+@pytest.mark.parametrize("value", [{"inputTokens": 7}, ["unknown activity"], "200000", True,
+                                    -1, 1.5, float("inf"), float("nan"), None, {}])
+@pytest.mark.parametrize("session,suppress", [("", False), ("prior-session", True)])
+def test_uncertain_capacity_is_sticky_before_callback_parsing(launch, monkeypatch, container, key, value, session, suppress):
+    swallowed = []
+    def process(**kw):
+        launch.calls.append(kw)
+        for evidence in ({container: {"sonnet": {key: value}}}, {}):
+            line = json.dumps({"type": "result", "is_error": True, "session_id": "kept",
+                               "result": "does not support this model; claude update", **evidence})
+            if suppress:
+                # Actual proc_exec callback policy: ordinary Exception is swallowed.
+                try:
+                    kw["on_line"](line)
+                except Exception as exc:
+                    swallowed.append(exc)
+            else:
+                kw["on_line"](line)
+        return ProcResult(returncode=1)
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    classifier = Mock(side_effect=AssertionError("uncertain work reached repair classifier"))
+    monkeypatch.setattr(updater, "is_cli_too_old_error", classifier)
+    result = launch.run(session)
+    assert not swallowed
+    assert not result.ok and result.requested_mode == "agent" and result.effective_mode == ""
+    assert result.upstream_session_id == "kept" and "does not support" in result.reply_text
+    assert result.usage["input_tokens"] == result.usage["output_tokens"] == 0
+    assert len(launch.calls) == 1
+    classifier.assert_not_called()
+    launch.update.assert_not_called()
+
+
+@pytest.mark.parametrize("key", CAPACITY_KEYS)
+@pytest.mark.parametrize("value", [0, 200000, 200000.0])
+def test_valid_scalar_capacity_has_no_work(key, value):
+    data = {"modelUsage": {"sonnet": {key: value}}, "model_usage": {"other": {"inputTokens": 0}}}
+    assert not a._StreamState._result_has_work(data)
+    assert a._StreamState._context_limit_from_result(data) == (int(value) or None if key.startswith("context") else None)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_combined_capacity_containers_keep_uncertainty_and_valid_limit(reverse):
+    containers = ["modelUsage", "model_usage"]
+    if reverse:
+        containers.reverse()
+    data = {containers[0]: {"a": {"contextWindow": {"future_usage": 1}}},
+            containers[1]: {"b": {"context_window": 200000}}}
+    assert a._StreamState._result_has_work(data)
+    assert a._StreamState._context_limit_from_result(data) == 200000
+
+
+@pytest.mark.parametrize("exception", [KeyboardInterrupt, SystemExit])
+def test_capacity_evidence_does_not_swallow_control_flow(exception):
+    class Interrupted(dict):
+        def items(self):
+            raise exception()
+    with pytest.raises(exception):
+        a._StreamState._result_has_work({"modelUsage": {"sonnet": Interrupted()}})
+
+
+def test_invalid_mode_is_never_stringified(launch):
+    class PrivateMode:
+        def __str__(self):
+            raise AssertionError("private mode stringified")
+    result = launch.run(mode=PrivateMode())
+    assert not result.ok and result.requested_mode == result.effective_mode == ""
+    assert not launch.calls and not launch.events
+    launch.resolver.assert_not_called()
+    launch.update.assert_not_called()
