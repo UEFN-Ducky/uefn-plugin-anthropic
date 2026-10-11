@@ -41,7 +41,6 @@ def launch(tmp_path, monkeypatch):
     monkeypatch.setattr(a, "resolve_claude_bin", resolver)
     monkeypatch.setattr(a, "claude_extra_dirs", lambda *_: [])
     monkeypatch.setattr(a, "_with_chat_captures", lambda *_: [])
-    monkeypatch.setattr(a, "_dbg_tool_pairing", lambda *_: None)
     monkeypatch.setattr(a, "coding_agent_cfg", lambda *_: {"permission_mode": "acceptEdits"})
     monkeypatch.setattr(a, "_core_has_permission_prompt", lambda: True)
     monkeypatch.setattr(PanelSettings, "load", lambda: object())
@@ -289,7 +288,7 @@ def registered_profile(launch, monkeypatch, historical_classes, helper, caps, re
             module = importlib.import_module(package.__name__ + ".claude_code_adapter")
             cli = importlib.import_module(package.__name__ + ".cli_update")
             patch.setattr(cli, "schedule_cli_update_on_plugin_load", Mock())
-            for name in ("resolve_claude_bin", "run_streaming_process", "claude_extra_dirs", "_with_chat_captures", "_dbg_tool_pairing", "coding_agent_cfg", "_core_has_permission_prompt"):
+            for name in ("resolve_claude_bin", "run_streaming_process", "claude_extra_dirs", "_with_chat_captures", "coding_agent_cfg", "_core_has_permission_prompt"):
                 patch.setattr(module, name, getattr(a, name))
             patch.setattr(cli, "update_claude_cli", launch.update)
             api = Mock()

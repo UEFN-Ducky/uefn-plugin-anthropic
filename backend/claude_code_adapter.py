@@ -375,20 +375,6 @@ def claude_code_model_rows() -> list[dict[str, Any]]:
     return claude_code_specific_rows()
 
 
-# #region agent log
-def _dbg_tool_pairing(message: str, data: dict[str, Any]) -> None:
-    try:
-        with open(r"C:\Users\tas13\Documents\GitHub\UEFN-Ducky\debug-77e3f2.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "sessionId": "77e3f2", "runId": "chat-lag-repro", "hypothesisId": "L-C",
-                "location": "backend/agent/coding_agents/claude_code.py",
-                "message": message, "data": data, "timestamp": int(time.time() * 1000),
-            }) + "\n")
-    except Exception:
-        pass
-# #endregion
-
-
 def _claude_desktop_installed() -> bool:
     """True when the Claude Desktop chat app is present (not the same as Claude Code CLI)."""
     appdata = os.environ.get("APPDATA", "").strip()
@@ -749,22 +735,6 @@ class _StreamState:
         """Turn ended with chips still open — close them so nothing spins forever."""
         note = "Cancelled before the tool finished." if cancelled else "Turn ended before the tool reported a result."
         leftovers = ([self._shown_tool] if self._shown_tool else []) + list(self._tool_queue)
-        # #region agent log
-        if leftovers:
-            now = time.monotonic()
-            _dbg_tool_pairing("claude turn ended with unresolved tools", {
-                "convId": self.conv_id, "cancelled": cancelled, "leftoverCount": len(leftovers),
-                "trackedCount": len(self._tools),
-                "tools": [
-                    {
-                        "id": str(tool_id)[:80],
-                        "name": str((self._tools.get(tool_id) or {}).get("name") or "tool"),
-                        "ageMs": int((now - float((self._tools.get(tool_id) or {}).get("started_at") or now)) * 1000),
-                    }
-                    for tool_id in leftovers[:30] if tool_id is not None
-                ],
-            })
-        # #endregion
         self._tool_queue = []
         for tool_id in leftovers:
             if tool_id is None or tool_id not in self._tools:
@@ -890,13 +860,6 @@ class _StreamState:
                 continue
             tid = str(block.get("tool_use_id") or "")
             if not tid or tid not in self._tools:
-                # #region agent log
-                _dbg_tool_pairing("claude tool result did not match a tracked tool", {
-                    "convId": self.conv_id, "toolId": tid[:80], "hasId": bool(tid),
-                    "trackedCount": len(self._tools), "queuedCount": len(self._tool_queue),
-                    "shownTool": str(self._shown_tool or "")[:80],
-                })
-                # #endregion
                 continue
             self._resolve_tool(
                 tid,
