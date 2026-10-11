@@ -411,6 +411,38 @@ def _claude_code_missing_status() -> str:
     )
 
 
+# With Ducky's tools attached, Claude Code's own are off: every command, edit, search,
+# web call, picture and helper goes through Ducky (a terminal tab the person can watch
+# and stop, the change journal, chats they can open). ToolSearch stays: it loads Ducky's
+# deferred tools.
+DUCKY_ONLY_TOOLS = "ToolSearch"
+# The same built-ins by name, for a Claude Code too old for --tools.
+NATIVE_TOOLS_DENY = (
+    "Bash,BashOutput,KillShell,KillBash,PowerShell,Monitor,Read,Write,Edit,MultiEdit,"
+    "NotebookEdit,NotebookRead,Glob,Grep,LS,WebFetch,WebSearch,Task,Agent,TaskCreate,TaskGet,"
+    "TaskList,TaskStop,TaskUpdate,TodoWrite,Skill,SlashCommand,AskUserQuestion,EnterWorktree,"
+    "ExitWorktree,Workflow,Artifact,ArtifactComments,ArtifactData,CronCreate,CronDelete,CronList,"
+    "ScheduleWakeup,RemoteTrigger,PushNotification,SendMessage,ListAgents,DesignSync,ReportFindings"
+)
+
+
+def _without_tools_flag(parts: list[str]) -> list[str]:
+    """Saved extra args never bring Claude Code's own tools back."""
+    out: list[str] = []
+    skip = False
+    for part in parts:
+        if skip:
+            skip = False
+            continue
+        if part == "--tools":
+            skip = True
+            continue
+        if part.startswith("--tools="):
+            continue
+        out.append(part)
+    return out
+
+
 def build_claude_argv(
     *,
     binary: str,
@@ -436,6 +468,7 @@ def build_claude_argv(
         argv.extend(["--mcp-config", mcp_config_path, "--strict-mcp-config"])
         # The injected `uefn` bridge is pre-approved: the user picked this agent.
         argv.extend(["--allowedTools", "mcp__uefn"])
+        argv.extend(["--tools", DUCKY_ONLY_TOOLS])
         if _core_has_permission_prompt():
             argv.extend(["--permission-prompt-tool", _PERMISSION_PROMPT_TOOL])
     mode = "plan" if read_only else (permission_mode if permission_mode in _PERMISSION_MODES else "acceptEdits")
@@ -462,7 +495,8 @@ def build_claude_argv(
         raise ValueError("Claude Code requires a model alias or id")
     extra = (extra_args or "").strip()
     if extra and not read_only:
-        argv.extend(shlex.split(extra, posix=False))
+        parts = shlex.split(extra, posix=False)
+        argv.extend(_without_tools_flag(parts) if mcp_config_path else parts)
     # Long user prompts must ride stdin (prompt_via_stdin), not argv.
     if not prompt_via_stdin:
         argv.append(prompt)
@@ -507,8 +541,8 @@ def _image_prompt_suffix(image_paths: list[str]) -> str:
         return ""
     listed = "\n".join(f"- {p}" for p in image_paths)
     return (
-        "\n\nThe user attached image file(s) with this message. View them by reading these "
-        f"absolute paths with your Read tool (it renders images):\n{listed}"
+        "\n\nThe user attached image file(s) with this message. Look at each with Ducky's "
+        f"`view_image` tool (pass the absolute path):\n{listed}"
     )
 
 
@@ -1251,6 +1285,16 @@ class ClaudeCodeAdapter:
                         continue
                     if flag == "--include-partial-messages":
                         argv = [arg for arg in argv if arg != flag]
+                        continue
+                    if flag == "--tools":
+                        # Too old for --tools: switch the same built-ins off by name.
+                        index = argv.index(flag)
+                        argv = argv[:index] + argv[index + 2:]
+                        if "--disallowedTools" in argv:
+                            at = argv.index("--disallowedTools") + 1
+                            argv[at] = argv[at] + "," + NATIVE_TOOLS_DENY
+                        else:
+                            argv[index:index] = ["--disallowedTools", NATIVE_TOOLS_DENY]
                         continue
                 from .cli_update import is_cli_too_old_error, update_claude_cli
 

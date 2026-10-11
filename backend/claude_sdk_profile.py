@@ -80,7 +80,7 @@ class PublicOptions:
     setting_sources: tuple[str, ...] | None
     settings: str | None = field(repr=False)
     env: tuple[tuple[str, str], ...] = field(repr=False)
-    tools: None = None
+    tools: tuple[str, ...] | None = None
     skills: None = None
     include_partial_messages: bool = True
     continue_conversation: bool = False
@@ -283,7 +283,8 @@ def build_profile(inputs: dict) -> Profile:
     env = tuple(effective.values())
     extras = _extras(inputs.get("extra_args", ()))
     argv = [binary, "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-            "--mcp-config", config_file, "--strict-mcp-config", "--allowedTools", "mcp__uefn"]
+            "--mcp-config", config_file, "--strict-mcp-config", "--allowedTools", "mcp__uefn",
+            "--tools", "ToolSearch"]
     permission_tool = "mcp__uefn__ducky_permission_prompt" if hook else None
     if permission_tool:
         argv += ["--permission-prompt-tool", permission_tool]
@@ -306,11 +307,11 @@ def build_profile(inputs: dict) -> Profile:
     suffix = ""
     if images:
         listed = "\n".join(f"- {path}" for path in images)
-        suffix = ("\n\nThe user attached image file(s) with this message. View them by reading these "
-                  f"absolute paths with your Read tool (it renders images):\n{listed}")
+        suffix = ("\n\nThe user attached image file(s) with this message. Look at each with Ducky's "
+                  f"`view_image` tool (pass the absolute path):\n{listed}")
     options = PublicOptions(model, session or None, cwd, (("type", "preset"), ("preset", "claude_code")),
         option_extras + extras, config_file, True, ("mcp__uefn",), permission, permission_tool,
-        dirs, sources, settings, env)
+        dirs, sources, settings, env, tools=("ToolSearch",))
     required = ("ducky_get_tools", "ducky_call_tool") + (("ducky_permission_prompt",) if hook else ())
     return Profile(tuple(argv), env, cwd, options, UserInput(prompt_file, suffix), identity,
                    config_snapshot, required)

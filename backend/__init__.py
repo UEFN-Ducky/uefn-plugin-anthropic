@@ -303,7 +303,9 @@ def register(api) -> None:
         resolve_api_fallback=_resolve_api_fallback,
         aliases=["claude", "claudecode", "claude_code_cli"],
         skills_dir=_skills_dir,
-        native_skills=True,
+        # Claude Code's Skill tool is off with the rest of its own tools: Ducky's
+        # skill packs load through `skill_read_subskill`.
+        native_skills=False,
         thinking_env=_thinking_env,
         before_launch=_before_launch,
         on_needs_login=_on_needs_login,

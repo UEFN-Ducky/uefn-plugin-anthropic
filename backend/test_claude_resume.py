@@ -80,3 +80,20 @@ def test_approval_card_hook_rides_with_the_uefn_bridge():
     assert with_bridge[i + 1] == "mcp__uefn__ducky_permission_prompt"
     # No bridge, no hook: the tool would not exist.
     assert "--permission-prompt-tool" not in build_claude_argv(mcp_config_path="", **base)
+
+
+def test_with_ducky_attached_claude_code_keeps_only_tool_search():
+    base = dict(
+        binary="claude",
+        prompt="hi",
+        system_prompt="",
+        model="sonnet",
+        session_id="",
+        permission_mode="acceptEdits",
+    )
+    argv = build_claude_argv(mcp_config_path="mcp.json", extra_args="--tools default --verbose", **base)
+    assert argv.count("--tools") == 1
+    assert argv[argv.index("--tools") + 1] == "ToolSearch"
+    assert "default" not in argv
+    # No Ducky bridge: no tools to fall back on, so Claude Code keeps its own.
+    assert "--tools" not in build_claude_argv(mcp_config_path="", extra_args="", **base)

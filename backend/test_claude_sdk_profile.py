@@ -52,10 +52,10 @@ def inputs():
 def accepted_functions():
     """Execute actual pure adapter functions, never its imports or launch path."""
     tree = ast.parse((HERE / "claude_code_adapter.py").read_text(encoding="utf-8"))
-    names = {"build_claude_argv", "_image_prompt_suffix"}
+    names = {"build_claude_argv", "_image_prompt_suffix", "_without_tools_flag"}
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     constants = [n for n in tree.body if isinstance(n, ast.Assign) and any(
-        isinstance(t, ast.Name) and t.id in {"_PERMISSION_MODES", "_PERMISSION_PROMPT_TOOL"}
+        isinstance(t, ast.Name) and t.id in {"_PERMISSION_MODES", "_PERMISSION_PROMPT_TOOL", "DUCKY_ONLY_TOOLS"}
         for t in n.targets)]
     scope = {"shlex": shlex, "_core_has_permission_prompt": lambda: True}
     exec(compile(ast.Module(body=constants + nodes, type_ignores=[]), "accepted-adapter-pure-functions", "exec"), scope)
@@ -82,7 +82,7 @@ def test_accepted_argv_parity(m, inputs, session, model, permission, hook):
     assert profile.options.resume == (session or None)
     assert profile.options.model == model
     assert profile.options.allowed_tools == ("mcp__uefn",)
-    assert profile.options.tools is None
+    assert profile.options.tools == ("ToolSearch",)
     assert profile.options.permission_mode == permission
     assert profile.options.permission_prompt_tool_name == ("mcp__uefn__ducky_permission_prompt" if hook else None)
     assert profile.required_tools == (("ducky_get_tools", "ducky_call_tool", "ducky_permission_prompt") if hook

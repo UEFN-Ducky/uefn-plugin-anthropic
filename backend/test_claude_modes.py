@@ -772,3 +772,24 @@ def test_an_older_ducky_without_chat_modes_keeps_the_settings_mode(launch, monke
 def test_registration_says_every_chat_approval_mode_works(launch, monkeypatch, historical_classes):
     with registered_profile(launch, monkeypatch, historical_classes, True, True, "current"):
         assert launch.registration["chat_permission_modes"] == ("ask", "edits", "all")
+
+
+def test_a_cli_without_tools_flag_switches_the_same_tools_off_by_name(launch, monkeypatch):
+    markers = iter(["unknown option '--tools'", ""])
+
+    def process(**kw):
+        launch.calls.append(kw)
+        marker = next(markers)
+        if not marker:
+            emit_success(kw)
+        return ProcResult(returncode=int(bool(marker)), stderr_tail=marker)
+
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    result = launch.run()
+    assert result.ok and len(launch.calls) == 2
+    first, retry = launch.calls[0]["argv"], launch.calls[1]["argv"]
+    assert first[first.index("--tools") + 1] == "ToolSearch"
+    assert "--tools" not in retry
+    denied = set(retry[retry.index("--disallowedTools") + 1].split(","))
+    assert {"Bash", "PowerShell", "Read", "Edit", "Write", "WebSearch", "Task", "Skill"} <= denied
+    assert "ToolSearch" not in denied
