@@ -6,6 +6,7 @@
   "description": "Anthropic API key + Claude Code coding agent for Settings \u2192 LLMs. Install from Store \u2192 Gateways, then enable to show Anthropic under Providers & Keys and Claude Code under Coding Agents.",
   "min_app_version": "1.2.380",
   "default_enabled": true,
+  "data_sharing": false,
   "secret_keys": [
     "anthropic"
   ],
