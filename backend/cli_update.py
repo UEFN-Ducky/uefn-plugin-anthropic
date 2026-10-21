@@ -9,6 +9,7 @@ Users never run `claude update` or the install script. This plugin:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 _INSTALL_PS = "irm https://claude.ai/install.ps1 | iex"
+_DEFAULT_PANEL_PORT = 4200
 _VERSION_RE = re.compile(r"(\d+(?:\.\d+)+)")
 _REQUIRED_RE = re.compile(
     r"does not support this model;\s*version\s+(\d+(?:\.\d+)+)\s+or newer",
@@ -26,6 +28,7 @@ _REQUIRED_RE = re.compile(
 _update_lock = threading.Lock()
 _busy = False
 _last: dict[str, Any] = {}
+_log = logging.getLogger(__name__)
 
 
 def plugin_package_version() -> str:
@@ -162,6 +165,12 @@ def _install_cli() -> dict[str, Any]:
 def update_claude_cli(binary: str = "") -> dict[str, Any]:
     """Install if missing, otherwise `claude update`. Locked; safe to call twice."""
     global _busy, _last
+    skip = install_skip_reason()
+    if skip:
+        # Every way in (plugin load, the heal after a too-old launch) ends here,
+        # so neither the installer nor `claude update` touches the person's
+        # real ~/.local/bin/claude.exe from a second instance.
+        return {"ok": False, "error": f"this Ducky instance does not install or update Claude Code ({skip})"}
     with _update_lock:
         _busy = True
         try:
@@ -222,6 +231,39 @@ def update_claude_cli(binary: str = "") -> dict[str, Any]:
             _busy = False
 
 
+def sandbox_skip_reason() -> str:
+    """Why this Ducky must not install or update Claude Code on its own ("" = it may).
+
+    A sandboxed test build (own LOCALAPPDATA/USERPROFILE, panel port 4300) has
+    no update stamp, so every plugin load ran `claude update` against the
+    person's real Claude Code. Core decides what counts as sandboxed; an older
+    core without the check falls back to the panel port, which every sandboxed
+    build moves off 4200.
+    """
+    try:
+        from frontend.ide_apply import auto_apply_skip_reason
+    except Exception:
+        return _panel_port_reason()
+    try:
+        return str(auto_apply_skip_reason() or "")
+    except Exception:
+        return _panel_port_reason()
+
+
+def _panel_port_reason() -> str:
+    port = (os.environ.get("UEFN_DUCKY_PANEL_PORT") or "").strip()
+    if port and port != str(_DEFAULT_PANEL_PORT):
+        return f"panel port {port} is not the default {_DEFAULT_PANEL_PORT}"
+    return ""
+
+
+def install_skip_reason() -> str:
+    """Why this Ducky must not run Claude Code's installer or `claude update` ("" = it may)."""
+    if os.environ.get("DUCKY_SKIP_CLI_UPDATE"):
+        return "DUCKY_SKIP_CLI_UPDATE is set"
+    return sandbox_skip_reason()
+
+
 def needs_plugin_load_update() -> bool:
     """True when CLI is missing or this plugin version has not updated it yet."""
     from .claude_auth import resolve_claude_bin
@@ -236,6 +278,10 @@ def needs_plugin_load_update() -> bool:
 
 def schedule_cli_update_on_plugin_load() -> None:
     """Background install/update after Store install/update or app start."""
+    reason = install_skip_reason()
+    if reason:
+        _log.info("Claude Code CLI auto-update skipped: %s", reason)
+        return
     try:
         if not needs_plugin_load_update():
             return
