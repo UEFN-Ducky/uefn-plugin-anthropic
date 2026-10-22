@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any
 
 _LAST_WINDOWS: list[dict[str, Any]] = []
+# Anthropic's plan-usage endpoint answers 429 with Retry-After (often 30+ min). Calling it
+# again before then only extends the block, so wait it out and show the last bars.
+_BLOCKED_UNTIL = 0.0
 _PAIRS = (
     (
         "anthropic-ratelimit-requests-remaining",
@@ -309,8 +312,25 @@ def _keep(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"windows": _LAST_WINDOWS}
 
 
-def _last_or_empty() -> dict[str, Any]:
-    return {"windows": list(_LAST_WINDOWS)} if _LAST_WINDOWS else {"windows": []}
+def _last_or_blocked() -> dict[str, Any]:
+    if _LAST_WINDOWS:
+        return {"windows": list(_LAST_WINDOWS)}
+    wait = max(60, int(_BLOCKED_UNTIL - time.time()))
+    return {
+        "windows": [],
+        "notice": {
+            "message": f"Claude is limiting plan checks. Next check in {(wait + 59) // 60} min.",
+            "provider_id": "anthropic",
+            "agent_id": "claude_code",
+        },
+    }
+
+
+def _block_from(r: Any) -> None:
+    global _BLOCKED_UNTIL
+    headers = getattr(r, "headers", None) or {}
+    wait = _num(headers.get("retry-after"))
+    _BLOCKED_UNTIL = time.time() + (wait if wait is not None and wait > 0 else 300.0)
 
 
 def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
@@ -331,6 +351,8 @@ def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
         elif not key:
             return _notice("Claude login expired. Log in to see 5-hour and weekly limits.")
     token = str(oauth.get("accessToken") or oauth.get("access_token") or "").strip()
+    if token and time.time() < _BLOCKED_UNTIL:
+        return _last_or_blocked()
     if token:
         try:
             import httpx
@@ -369,7 +391,8 @@ def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
                 if r.status_code == 401:
                     return _notice("Claude login expired. Log in to see 5-hour and weekly limits.")
             if r.status_code == 429:
-                return _last_or_empty()
+                _block_from(r)
+                return _last_or_blocked()
             if r.status_code < 400:
                 rows = windows_from_oauth_usage(r.json())
                 if rows:

@@ -55,6 +55,7 @@ def test_429_keeps_last_windows_without_notice(monkeypatch) -> None:
     import httpx
     import usage as u
 
+    u._BLOCKED_UNTIL = 0.0
     u._LAST_WINDOWS = [
         {"id": "hourly", "label": "5-hour limit", "used": 40, "limit": 100, "readout": "40%"}
     ]
@@ -70,18 +71,49 @@ def test_429_keeps_last_windows_without_notice(monkeypatch) -> None:
     assert "notice" not in out
 
 
-def test_429_without_last_is_empty(monkeypatch) -> None:
+def test_429_without_last_says_when_it_checks_again(monkeypatch) -> None:
     import httpx
     import usage as u
 
     u._LAST_WINDOWS = []
+    u._BLOCKED_UNTIL = 0.0
 
     class _R:
         status_code = 429
+        headers = {"retry-after": "2307"}
 
     monkeypatch.setattr(u, "_load_claude_oauth", lambda: (None, {}, {"accessToken": "tok"}))
     monkeypatch.setattr(u, "_oauth_expired", lambda oauth: False)
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _R())
     out = u.fetch_usage("")
-    assert out == {"windows": []}
+    assert out["windows"] == []
+    assert out["notice"]["message"] == "Claude is limiting plan checks. Next check in 39 min."
+    assert "action_label" not in out["notice"]
+
+
+def test_waits_out_retry_after_before_calling_again(monkeypatch) -> None:
+    import httpx
+    import usage as u
+
+    u._LAST_WINDOWS = []
+    u._BLOCKED_UNTIL = 0.0
+    calls: list[str] = []
+
+    class _R:
+        status_code = 429
+        headers = {"retry-after": "600"}
+
+    def fake_get(*a, **k):
+        calls.append(a[0])
+        return _R()
+
+    monkeypatch.setattr(u, "_load_claude_oauth", lambda: (None, {}, {"accessToken": "tok"}))
+    monkeypatch.setattr(u, "_oauth_expired", lambda oauth: False)
+    monkeypatch.setattr(httpx, "get", fake_get)
+    u.fetch_usage("")
+    u.fetch_usage("")
+    assert len(calls) == 1
+    monkeypatch.setattr(u.time, "time", lambda: u._BLOCKED_UNTIL + 1)
+    u.fetch_usage("")
+    assert len(calls) == 2
 
