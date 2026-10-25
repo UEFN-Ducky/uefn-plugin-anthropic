@@ -858,3 +858,58 @@ def test_turn_ends_within_a_second_of_result_on_a_cli_that_waits_for_eof(launch,
     done = time.monotonic()
     assert result.ok and result.reply_text == f"got {size}"
     assert done - seen["result"] < 1.0
+
+
+_INTERRUPTIBLE_CLI = r'''
+import json, sys
+sys.stdin.readline()  # the prompt
+print(json.dumps({"type": "system", "subtype": "init", "mcp_servers": [{"name": "uefn", "status": "connected"}]}), flush=True)
+for line in sys.stdin:  # a long tool call: waits for Stop
+    msg = json.loads(line)
+    if msg.get("type") == "control_request" and msg["request"]["subtype"] == "interrupt":
+        open(sys.argv[1], "w").write("interrupted")
+        print(json.dumps({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"]}}), flush=True)
+        print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True, "session_id": "s1"}), flush=True)
+sys.exit(0)  # stdin EOF: the adapter closed it after the result
+'''
+
+
+def test_stop_sends_the_interrupt_and_the_turn_ends_without_a_kill(launch, monkeypatch, tmp_path):
+    from backend.agent.coding_agents import proc_exec
+
+    script = tmp_path / "fake_claude.py"
+    script.write_text(_INTERRUPTIBLE_CLI, encoding="utf-8")
+    marker = tmp_path / "interrupted.txt"
+    cancel = threading.Event()
+    kills = []
+    monkeypatch.setattr(proc_exec, "STOP_GRACE_S", 10.0)
+    real_kill = proc_exec._terminate_process_tree
+    monkeypatch.setattr(proc_exec, "_terminate_process_tree", lambda p: kills.append(p.poll()) or real_kill(p))
+    adapter = a.ClaudeCodeAdapter()
+    proc_exec.set_stop_requester("test", lambda: adapter.request_stop("test"))
+
+    def real(**kw):
+        on_line = kw["on_line"]
+
+        def stop_after_init(line):
+            on_line(line)
+            if '"init"' in line:
+                cancel.set()
+
+        return proc_exec.run_streaming_process(**dict(kw, argv=[sys.executable, str(script), str(marker)], on_line=stop_after_init, timeout_s=20))
+
+    monkeypatch.setattr(a, "run_streaming_process", real)
+    try:
+        started = time.monotonic()
+        result = launch.run(cancel=cancel)
+        elapsed = time.monotonic() - started
+    finally:
+        proc_exec.set_stop_requester("test", None)
+    assert marker.read_text() == "interrupted"
+    assert result.status == "cancelled" and not result.ok
+    assert elapsed < 5.0  # well inside the 10 s grace: the CLI ended the turn itself
+    assert all(code is not None for code in kills)  # any tree kill found it already exited
+
+
+def test_request_stop_without_an_open_stdin_asks_for_the_kill():
+    assert a.ClaudeCodeAdapter().request_stop("no-such-chat") is False

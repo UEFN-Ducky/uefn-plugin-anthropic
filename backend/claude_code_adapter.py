@@ -15,6 +15,7 @@ import re
 import shlex
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -1050,6 +1051,22 @@ class ClaudeCodeAdapter:
         resume=True,
         **({"supported_modes": ("agent", "ask", "plan")} if "supported_modes" in _CAPABILITY_PARAMETERS else {}),
     )
+
+    def request_stop(self, conv_id: str) -> bool:
+        """Stop asks first: Claude's interrupt over the turn's open stdin.
+
+        Claude answers with a ``result``, which closes stdin and ends the turn; core kills
+        after its grace if not. False (stdin already closed, older core) = kill at once.
+        """
+        from backend.agent.coding_agents import proc_exec
+
+        get_writer = getattr(proc_exec, "get_stdin_writer", None)
+        writer = get_writer(conv_id) if get_writer else None
+        if writer is None:
+            return False
+        return writer.write_line(json.dumps({
+            "type": "control_request", "request_id": uuid.uuid4().hex, "request": {"subtype": "interrupt"},
+        }))
 
     def detect(self, settings: Any) -> CodingAgentInfo:
         cfg = coding_agent_cfg(settings, self.id)
