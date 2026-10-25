@@ -806,6 +806,35 @@ def test_prompt_rides_stdin_as_one_stream_json_line_kept_open(launch):
     assert call["keep_stdin_open"] is True and callable(call["on_stdin_writer"])
 
 
+def test_on_a_core_that_writes_stdin_first_the_prompt_goes_through_the_writer(launch, monkeypatch):
+    # Cores up to 1.2.431 wrote stdin_data before reading the CLI's output and deadlocked on big
+    # prompts; there the plugin hands over no stdin_data and writes the line on its own thread.
+    monkeypatch.setattr(a, "_CORE_FEEDS_STDIN_LATE", False)
+    written = []
+    wrote = threading.Event()
+
+    class _Writer:
+        def write_line(self, text):
+            written.append(text)
+            wrote.set()
+            return True
+
+        def close(self):
+            pass
+
+    def process(**kw):
+        launch.calls.append(kw)
+        kw["on_stdin_writer"](_Writer())  # called before the old core reads any output
+        assert wrote.wait(5)
+        emit_success(kw)
+        return ProcResult(returncode=0)
+
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    assert launch.run().ok
+    assert launch.calls[0]["stdin_data"] is None and launch.calls[0]["keep_stdin_open"] is True
+    assert json.loads(written[0])["message"]["content"] == [{"type": "text", "text": "user payload"}]
+
+
 def test_a_cli_without_stream_json_input_gets_the_plain_prompt(launch, monkeypatch):
     markers = iter(["unknown option '--input-format'", ""])
 

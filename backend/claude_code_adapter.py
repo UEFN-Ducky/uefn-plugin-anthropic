@@ -28,6 +28,7 @@ from backend.agent.coding_agents.base import (
 )
 from .claude_auth import is_claude_logged_in, resolve_claude_bin
 from backend.agent.coding_agents.cli_shared import finalize_cli_turn, truncate_tool_result
+from backend.agent.coding_agents import proc_exec as _proc_exec
 from backend.agent.coding_agents.proc_exec import run_streaming_process
 from backend.agent.coding_agents.settings_helpers import coding_agent_cfg
 
@@ -546,6 +547,10 @@ def _stream_json_user_line(text: str) -> str:
 
 # Older cores close stdin after the write; stream-json input still works then.
 _KEEP_STDIN_OPEN = "keep_stdin_open" in inspect.signature(run_streaming_process).parameters
+# Cores up to 1.2.431 write stdin_data before they read the CLI's output: an old chat's prompt,
+# bigger than the pipe buffer, deadlocked there and the chat sat on Thinking (Oct 25 2026). On
+# those the prompt goes through the stdin writer on its own thread (_StreamState.attach_stdin).
+_CORE_FEEDS_STDIN_LATE = hasattr(_proc_exec, "StdinWriter") and hasattr(_proc_exec.StdinWriter, "write_soon")
 
 
 def _tool_result_to_text(content: Any) -> str:
@@ -610,9 +615,15 @@ class _StreamState:
         self._delta_kind: str = "text_delta"
         self._delta_last_flush = 0.0
         self.stdin_writer: Any = None
+        self.pending_stdin = ""
 
     def attach_stdin(self, writer: Any) -> None:
         self.stdin_writer = writer
+        line, self.pending_stdin = self.pending_stdin, ""
+        if line:
+            # Older cores call this before they read the CLI's output: never write here.
+            threading.Thread(target=writer.write_line, args=(line,), daemon=True,
+                             name=f"claude-stdin-{self.conv_id[:8]}").start()
 
     def close_stdin(self) -> None:
         writer, self.stdin_writer = self.stdin_writer, None
@@ -1236,14 +1247,16 @@ class ClaudeCodeAdapter:
                     ))
                 state = _StreamState(conv_id, run_id, push, require_ducky=True)
                 stream_input = "--input-format" in argv
+                stdin_data: str | None = _stream_json_user_line(stdin_payload) if stream_input else stdin_payload
                 stdin_kw: dict[str, Any] = {}
                 if stream_input and _KEEP_STDIN_OPEN:
                     stdin_kw = {"keep_stdin_open": True, "on_stdin_writer": state.attach_stdin}
+                    if not _CORE_FEEDS_STDIN_LATE:
+                        state.pending_stdin, stdin_data = stdin_data or "", None
                 proc = run_streaming_process(
                     argv=argv, cwd=cwd, env_extra={**env, "MCP_TIMEOUT": "60000"}, conv_id=conv_id,
                     on_line=state.on_line, timeout_s=timeout_s, cancel=cancel,
-                    stdin_data=_stream_json_user_line(stdin_payload) if stream_input else stdin_payload,
-                    **stdin_kw,
+                    stdin_data=stdin_data, **stdin_kw,
                 )
                 state.close_stdin()
                 # Finalize every attempt before inspecting any retry marker.
