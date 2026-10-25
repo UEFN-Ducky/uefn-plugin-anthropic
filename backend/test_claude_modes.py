@@ -730,7 +730,7 @@ def test_cold_server_then_first_claude_tool(launch, monkeypatch, session):
     monkeypatch.setattr(shared_mcp, "start_daemon_from_app", lambda: {"ok": True})
     monkeypatch.setattr(shared_mcp, "_daemon_answers", lambda **kw: now[0] >= 8)
     def process(**kw):
-        assert now[0] == 8
+        assert 8 <= now[0] < 9  # first readiness poll after the daemon answers
         assert kw["env_extra"]["MCP_TIMEOUT"] == "60000"
         emit_init(kw)
         kw["on_line"](json.dumps({"type": "assistant", "message": {"content": [

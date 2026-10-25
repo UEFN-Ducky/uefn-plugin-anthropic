@@ -195,7 +195,8 @@ def test_valid_config_preserves_launch(tmp_path, monkeypatch, launch, session, s
     assert argv[argv.index("--mcp-config") + 1] == str(path)
     assert "--strict-mcp-config" in argv
     assert argv[argv.index("--permission-prompt-tool") + 1] == adapter._PERMISSION_PROMPT_TOOL
-    assert calls[0]["stdin_data"] == "test user task"
+    assert argv[argv.index("--input-format") + 1] == "stream-json"
+    assert json.loads(calls[0]["stdin_data"])["message"]["content"] == [{"type": "text", "text": "test user task"}]
     assert json.loads(path.read_text(encoding="utf-8")) == {"mcpServers": {"uefn": server}}
     assert ("--resume" in argv) == bool(session)
     if session:

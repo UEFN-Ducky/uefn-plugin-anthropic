@@ -77,7 +77,10 @@ def test_accepted_argv_parity(m, inputs, session, model, permission, hook):
         system_prompt_file=inputs["system_prompt_file"], prompt_via_stdin=True,
         model=model, mcp_config_path=inputs["mcp_config_file"], extra_args="",
         session_id=session, permission_mode=permission, image_dirs=dirs)
-    assert profile.argv == tuple(argv + ["--input-format", "stream-json"])
+    # The CLI adapter puts --input-format right after -p; the profile keeps it at the end.
+    at = argv.index("--input-format")
+    assert argv[at + 1] == "stream-json"
+    assert profile.argv == tuple(argv[:at] + argv[at + 2:] + ["--input-format", "stream-json"])
     assert profile.cwd == inputs["cwd"]
     assert profile.options.resume == (session or None)
     assert profile.options.model == model
