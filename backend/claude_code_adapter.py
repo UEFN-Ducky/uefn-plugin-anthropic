@@ -449,7 +449,12 @@ def build_claude_argv(
     Prefer ``system_prompt_file`` + ``prompt_via_stdin=True`` so long pastes never
     hit Windows CreateProcess WinError 206 (command line / env too long).
     """
-    argv = [binary, "-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+    argv = [binary, "-p"]
+    if prompt_via_stdin:
+        # One stream-json user line on stdin, which stays open for the turn so Stop
+        # can send an interrupt; the adapter closes it after the result event.
+        argv.extend(["--input-format", "stream-json"])
+    argv.extend(["--output-format", "stream-json", "--verbose", "--include-partial-messages"])
     if mcp_config_path:
         argv.extend(["--mcp-config", mcp_config_path, "--strict-mcp-config"])
         # The injected `uefn` bridge is pre-approved: the user picked this agent.
@@ -532,6 +537,16 @@ def _image_prompt_suffix(image_paths: list[str]) -> str:
     )
 
 
+def _stream_json_user_line(text: str) -> str:
+    """The prompt as one ``--input-format stream-json`` user message line."""
+    message = {"role": "user", "content": [{"type": "text", "text": text}]}
+    return json.dumps({"type": "user", "message": message}) + "\n"
+
+
+# Older cores close stdin after the write; stream-json input still works then.
+_KEEP_STDIN_OPEN = "keep_stdin_open" in inspect.signature(run_streaming_process).parameters
+
+
 def _tool_result_to_text(content: Any) -> str:
     """Flatten a tool_result content payload (string or text blocks) for the UI."""
     if isinstance(content, str):
@@ -593,6 +608,18 @@ class _StreamState:
         self._delta_buf: list[str] = []
         self._delta_kind: str = "text_delta"
         self._delta_last_flush = 0.0
+        self.stdin_writer: Any = None
+
+    def attach_stdin(self, writer: Any) -> None:
+        self.stdin_writer = writer
+
+    def close_stdin(self) -> None:
+        writer, self.stdin_writer = self.stdin_writer, None
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
 
     def stdout_empty(self) -> bool:
         return not self.saw_json
@@ -923,6 +950,14 @@ class _StreamState:
         return best or None
 
     def _on_result(self, data: dict[str, Any]) -> None:
+        # The CLI exits only on stdin EOF once its result is out: close it even if parsing fails.
+        # ponytail: no 5 s fallback timer, close() always marks the writer closed; core closes on exit/cancel.
+        try:
+            self._parse_result(data)
+        finally:
+            self.close_stdin()
+
+    def _parse_result(self, data: dict[str, Any]) -> None:
         # Retry evidence is sticky and separate from displayed usage totals.
         # Retain it before presentation or parsing can fail in the callback.
         self.saw_work = self.saw_work or self._result_has_work(data)
@@ -1183,11 +1218,17 @@ class ClaudeCodeAdapter:
                         ok=False, status="cancelled", error="Cancelled", upstream_session_id=session_id,
                     ))
                 state = _StreamState(conv_id, run_id, push, require_ducky=True)
+                stream_input = "--input-format" in argv
+                stdin_kw: dict[str, Any] = {}
+                if stream_input and _KEEP_STDIN_OPEN:
+                    stdin_kw = {"keep_stdin_open": True, "on_stdin_writer": state.attach_stdin}
                 proc = run_streaming_process(
                     argv=argv, cwd=cwd, env_extra={**env, "MCP_TIMEOUT": "60000"}, conv_id=conv_id,
                     on_line=state.on_line, timeout_s=timeout_s, cancel=cancel,
-                    stdin_data=stdin_payload,
+                    stdin_data=_stream_json_user_line(stdin_payload) if stream_input else stdin_payload,
+                    **stdin_kw,
                 )
+                state.close_stdin()
                 # Finalize every attempt before inspecting any retry marker.
                 state.flush_stream()
                 state.finish_unresolved_tools(cancelled=proc.cancelled)
@@ -1248,6 +1289,11 @@ class ClaudeCodeAdapter:
                         continue
                     if flag == "--include-partial-messages":
                         argv = [arg for arg in argv if arg != flag]
+                        continue
+                    if flag == "--input-format":
+                        # Too old for stream-json input: plain prompt on stdin, closed after the write.
+                        index = argv.index(flag)
+                        argv = argv[:index] + argv[index + 2:]
                         continue
                     if flag == "--tools":
                         # Too old for --tools: switch the same built-ins off by name.

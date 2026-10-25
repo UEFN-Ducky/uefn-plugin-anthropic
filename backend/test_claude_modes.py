@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 import types
 from unittest.mock import Mock
 
@@ -792,3 +793,68 @@ def test_a_cli_without_tools_flag_switches_the_same_tools_off_by_name(launch, mo
     denied = set(retry[retry.index("--disallowedTools") + 1].split(","))
     assert {"Bash", "PowerShell", "Read", "Edit", "Write", "WebSearch", "Task", "Skill"} <= denied
     assert "ToolSearch" not in denied
+
+
+def test_prompt_rides_stdin_as_one_stream_json_line_kept_open(launch):
+    assert launch.run().ok
+    call = launch.calls[0]
+    argv = call["argv"]
+    assert argv[1:4] == ["-p", "--input-format", "stream-json"]
+    assert call["stdin_data"].endswith("\n") and call["stdin_data"].count("\n") == 1
+    line = json.loads(call["stdin_data"])
+    assert line == {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "user payload"}]}}
+    assert call["keep_stdin_open"] is True and callable(call["on_stdin_writer"])
+
+
+def test_a_cli_without_stream_json_input_gets_the_plain_prompt(launch, monkeypatch):
+    markers = iter(["unknown option '--input-format'", ""])
+
+    def process(**kw):
+        launch.calls.append(kw)
+        marker = next(markers)
+        if not marker:
+            emit_success(kw)
+        return ProcResult(returncode=int(bool(marker)), stderr_tail=marker)
+
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    assert launch.run().ok and len(launch.calls) == 2
+    retry = launch.calls[1]
+    assert "--input-format" not in retry["argv"] and "stream-json" in retry["argv"]
+    assert retry["stdin_data"] == "user payload" and "keep_stdin_open" not in retry
+
+
+_FAKE_CLI = r'''
+import json, sys
+first = json.loads(sys.stdin.readline())
+text = first["message"]["content"][0]["text"]
+print(json.dumps({"type": "system", "subtype": "init", "mcp_servers": [{"name": "uefn", "status": "connected"}]}), flush=True)
+print(json.dumps({"type": "result", "subtype": "success", "result": "got %d" % len(text), "session_id": "s1"}), flush=True)
+sys.stdin.read()  # like the real CLI: exits only on stdin EOF
+'''
+
+
+@pytest.mark.parametrize("size", [10, 200_000])
+def test_turn_ends_within_a_second_of_result_on_a_cli_that_waits_for_eof(launch, monkeypatch, tmp_path, size):
+    from backend.agent.coding_agents import proc_exec
+
+    script = tmp_path / "fake_claude.py"
+    script.write_text(_FAKE_CLI, encoding="utf-8")
+    seen: dict[str, float] = {}
+
+    def real(**kw):
+        on_line = kw["on_line"]
+
+        def timed(line):
+            if '"type": "result"' in line:
+                seen["result"] = time.monotonic()
+            on_line(line)
+
+        # A stdin left open would hang the fake until this timeout.
+        return proc_exec.run_streaming_process(**dict(kw, argv=[sys.executable, str(script)], on_line=timed, timeout_s=10))
+
+    monkeypatch.setattr(a, "run_streaming_process", real)
+    prompt = "x" * size
+    result = launch.run(prompt=prompt)
+    done = time.monotonic()
+    assert result.ok and result.reply_text == f"got {size}"
+    assert done - seen["result"] < 1.0
