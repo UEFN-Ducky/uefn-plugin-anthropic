@@ -54,6 +54,19 @@
             "default": true,
             "label": "Extended cache TTL (1h)",
             "description": "Uses Anthropic's 1-hour ephemeral cache instead of the default 5-minute window."
+          },
+          {
+            "id": "autoCompactWindow",
+            "type": "select",
+            "default": "",
+            "label": "Claude Code: auto-compact after",
+            "description": "Claude Code summarizes a chat's session once it reaches this many tokens. Lower keeps every turn cheaper on 1M-context models; Claude Code's default waits until the window is nearly full.",
+            "options": [
+              { "value": "", "label": "Claude Code default" },
+              { "value": "150000", "label": "150K tokens" },
+              { "value": "300000", "label": "300K tokens" },
+              { "value": "500000", "label": "500K tokens" }
+            ]
           }
         ]
       }

@@ -103,6 +103,38 @@ def test_restricted_invalid_refusal_precedes_all_setup(launch, monkeypatch, sess
     launch.update.assert_not_called()
 
 
+def test_a_cold_big_session_is_compacted_before_the_message(launch):
+    result = launch.run("prior-session", env={"MOCK_ENV": "kept", "DUCKY_COMPACT_FIRST": "1"})
+    assert result.ok and len(launch.calls) == 2
+    first, second = launch.calls
+    assert "/compact" in first["stdin_data"] and "user payload" not in first["stdin_data"]
+    assert first["argv"][first["argv"].index("--resume") + 1] == "prior-session"
+    # The turn resumes the session the compaction left.
+    assert second["argv"][second["argv"].index("--resume") + 1] == "saved-session"
+    assert any("Compacting" in str(e.get("text")) for e in launch.events)
+
+
+def test_compaction_needs_a_session_and_the_flag(launch):
+    launch.run("", env={"MOCK_ENV": "kept", "DUCKY_COMPACT_FIRST": "1"})
+    launch.run("prior-session")
+    assert len(launch.calls) == 2
+    assert not any("/compact" in str(c.get("stdin_data")) for c in launch.calls)
+
+
+def test_a_failed_compaction_leaves_the_turn_unchanged(launch, monkeypatch):
+    def process(**kw):
+        launch.calls.append(kw)
+        if "/compact" in str(kw.get("stdin_data")):
+            return ProcResult(returncode=1, stderr_tail="boom")
+        emit_success(kw)
+        return ProcResult(returncode=0)
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    result = launch.run("prior-session", env={"MOCK_ENV": "kept", "DUCKY_COMPACT_FIRST": "1"})
+    assert result.ok and len(launch.calls) == 2
+    second = launch.calls[1]["argv"]
+    assert second[second.index("--resume") + 1] == "prior-session"
+
+
 def test_same_session_mode_switches_apply_current_mode(launch):
     for mode in ("agent", "ask", "plan", "agent", "plan", "ask"):
         before = len(launch.calls)
@@ -174,7 +206,8 @@ def test_safe_fallback_chain_preserves_effective_payload(launch, monkeypatch, se
         assert argv[argv.index("--mcp-config") + 1] == launch.kwargs["mcp_config_path"]
         assert "--strict-mcp-config" in argv and "--permission-prompt-tool" in argv
         assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
-        assert c["env_extra"] == {"MOCK_ENV": "kept", "MCP_TIMEOUT": "60000"}
+        assert c["env_extra"] == a.claude_env({"MOCK_ENV": "kept"})
+        assert c["env_extra"]["MOCK_ENV"] == "kept" and c["env_extra"]["MCP_TIMEOUT"] == "60000"
         assert ("--resume" in argv) == bool(session)
     assert result.ok
 

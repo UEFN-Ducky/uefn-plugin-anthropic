@@ -445,6 +445,7 @@ def build_claude_argv(
     system_prompt_file: str = "",
     prompt_via_stdin: bool = False,
     read_only: bool = False,
+    auto_compact_window: int = 0,
 ) -> list[str]:
     """Argv for one streaming turn (unit-testable, no side effects).
 
@@ -486,6 +487,9 @@ def build_claude_argv(
         argv.extend(["--model", model])
     else:
         raise ValueError("Claude Code requires a model alias or id")
+    if auto_compact_window > 0:
+        # Before the user's extra args, so their own --settings still wins.
+        argv.extend(["--settings", json.dumps({"autoCompactWindow": int(auto_compact_window)})])
     extra = (extra_args or "").strip()
     if extra and not read_only:
         parts = shlex.split(extra, posix=False)
@@ -494,6 +498,57 @@ def build_claude_argv(
     if not prompt_via_stdin:
         argv.append(prompt)
     return argv
+
+
+def prompt_cache_ttl_s(cache_creation: Any) -> int:
+    """Seconds the prompt cache a step wrote lives: 3600 (1 h tier), 300 (5 min) or 0 (none)."""
+    if not isinstance(cache_creation, dict):
+        return 0
+    if int(cache_creation.get("ephemeral_1h_input_tokens") or 0) > 0:
+        return 3600
+    if int(cache_creation.get("ephemeral_5m_input_tokens") or 0) > 0:
+        return 300
+    return 0
+
+
+def auto_compact_window() -> int:
+    """The Settings → LLMs "auto-compact after" choice in tokens; 0 = Claude Code's default."""
+    try:
+        from frontend.ui_web.plugin_host_api import prefs_plugin_get
+
+        raw = str(prefs_plugin_get("anthropic").get("autoCompactWindow") or "").strip()
+    except Exception:
+        return 0
+    return int(raw) if raw.isdigit() else 0
+
+
+def claude_env(env: dict[str, str]) -> dict[str, str]:
+    """Process env for one Claude Code turn. A value the user set in their own env wins."""
+    out = {**env, "MCP_TIMEOUT": "60000"}
+    # Auto tool search inlines every MCP schema while they fit a share of the window:
+    # all of Ducky's tools, every turn, on 1M-context models. Always defer them.
+    if "ENABLE_TOOL_SEARCH" not in os.environ:
+        out.setdefault("ENABLE_TOOL_SEARCH", "true")
+    return out
+
+
+_COMPACT_TIMEOUT_S = 300.0
+
+
+def _compact_cold_session(argv: list[str], *, cwd: str, env: dict[str, str], conv_id: str, run_id: str,
+                          push: Any, cancel: threading.Event | None) -> str:
+    """Summarize a resumed session whose prompt cache went cold, before the turn re-sends it
+    whole at full price. Returns the session to resume next; '' leaves the turn unchanged."""
+    push({"type": "status", "conv_id": conv_id, "run_id": run_id,
+          "text": "Compacting this chat's session first: its cache went cold, so resending it whole costs full price."})
+    state = _StreamState(conv_id, run_id, lambda _event: None)
+    proc = run_streaming_process(
+        argv=argv, cwd=cwd, env_extra=claude_env(env), conv_id=conv_id, on_line=state.on_line,
+        timeout_s=_COMPACT_TIMEOUT_S, cancel=cancel, stdin_data=_stream_json_user_line("/compact"),
+    )
+    if proc.returncode != 0 or proc.cancelled or proc.timed_out or state.is_error:
+        return ""
+    return state.session_id or ""
 
 
 def _with_chat_captures(image_dirs: list[str], conv_id: str) -> list[str]:
@@ -597,6 +652,9 @@ class _StreamState:
         # cumulative across num_turns — do not use that sum as "current context".
         self._last_step_context_tokens = 0
         self._seen_usage_ids: set[str] = set()
+        # Prompt cache: the tier the session last wrote (seconds) and when a step last used it.
+        self._cache_ttl_s = 0
+        self._cache_used_at = 0.0
         # Ordered thinking/text/tool_call blocks in the embedded agent's persisted
         # format, so the turn's steps survive a panel reload (not just the reply).
         self.blocks: list[dict[str, Any]] = []
@@ -931,6 +989,11 @@ class _StreamState:
         window = self._step_window_tokens(usage)
         if window > 0:
             self._last_step_context_tokens = window
+        ttl = prompt_cache_ttl_s(usage.get("cache_creation"))
+        if ttl:
+            self._cache_ttl_s = ttl
+        if int(usage.get("cache_read_input_tokens") or 0) or int(usage.get("cache_creation_input_tokens") or 0):
+            self._cache_used_at = time.time()
 
     @staticmethod
     def _valid_capacity(value: Any) -> bool:
@@ -1013,6 +1076,9 @@ class _StreamState:
         limit = self._context_limit_from_result(data)
         if limit is not None:
             payload["context_limit"] = limit
+        if self._cache_used_at:
+            # Each hit restarts the timer at the tier it was written with; 5 min is the default.
+            payload["cache_expires_at"] = self._cache_used_at + (self._cache_ttl_s or 300)
         self.usage = payload
 
     @staticmethod
@@ -1229,12 +1295,21 @@ class ClaudeCodeAdapter:
                 permission_mode=_chat_permission_mode(conv_id, str(cfg.get("permission_mode") or "acceptEdits")),
                 read_only=mode in ("ask", "plan"),
                 image_dirs=image_dirs,
+                auto_compact_window=auto_compact_window(),
             )
             push({
                 "type": "status",
                 "text": "Resumed Claude Code session…" if session_id else "Starting Claude Code…",
                 "conv_id": conv_id, "run_id": run_id,
             })
+            # Core asks for this when the session is big and its prompt cache has expired.
+            if session_id and env.get("DUCKY_COMPACT_FIRST") == "1" and not cancelled():
+                compacted = _compact_cold_session(argv, cwd=cwd, env=env, conv_id=conv_id, run_id=run_id,
+                                                  push=push, cancel=cancel)
+                if compacted:
+                    at = argv.index("--resume") + 1
+                    argv = [*argv[:at], compacted, *argv[at + 1:]]
+                    session_id = compacted
             stdin_payload = full_prompt
             updated = False
             previous_result = None
@@ -1254,7 +1329,7 @@ class ClaudeCodeAdapter:
                     if not _CORE_FEEDS_STDIN_LATE:
                         state.pending_stdin, stdin_data = stdin_data or "", None
                 proc = run_streaming_process(
-                    argv=argv, cwd=cwd, env_extra={**env, "MCP_TIMEOUT": "60000"}, conv_id=conv_id,
+                    argv=argv, cwd=cwd, env_extra=claude_env(env), conv_id=conv_id,
                     on_line=state.on_line, timeout_s=timeout_s, cancel=cancel,
                     stdin_data=stdin_data, **stdin_kw,
                 )
