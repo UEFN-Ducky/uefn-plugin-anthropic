@@ -19,36 +19,37 @@ sys.modules[pkg.__name__] = pkg
 a = importlib.import_module(pkg.__name__ + ".claude_code_adapter")
 fo = importlib.import_module(pkg.__name__ + ".failover")
 u = importlib.import_module(pkg.__name__ + ".usage")
-acc = importlib.import_module(pkg.__name__ + ".accounts")
 from backend.agent.coding_agents.proc_exec import ProcResult
 
 FUTURE = 2_000_000_000.0
+AGENT = "claude_code"
 
 
 @pytest.fixture(autouse=True)
 def accounts(tmp_path, monkeypatch):
-    """Both account folders and the state file live in tmp; no network, no CLI."""
+    """Core's real account store in tmp, Claude's own folder in tmp; no network, no CLI."""
     monkeypatch.delenv("DUCKY_CLAUDE_FAILOVER", raising=False)
-    dirs = {1: tmp_path / "acc1", 2: tmp_path / "acc2"}
-    for d in dirs.values():
-        d.mkdir()
-    ns = types.SimpleNamespace(dirs=dirs, windows={1: None, 2: None}, enabled=True, logged_in=True,
-                               state=tmp_path / "state.json", preferred=1)
-    ns.login = lambda n=2: (dirs[n] / ".credentials.json").write_text(
-        json.dumps({"claudeAiOauth": {"accessToken": f"tok{n}"}}), encoding="utf-8")
-    creds = lambda n: [dirs[int(n)] / ".credentials.json", dirs[int(n)] / "credentials.json"]
-    monkeypatch.setattr(fo, "state_path", lambda: ns.state)
-    monkeypatch.setattr(fo, "account_config_dir", lambda n: dirs[int(n)])
-    monkeypatch.setattr(fo, "account_credentials_paths", creds)
-    monkeypatch.setattr(fo, "failover_enabled", lambda: ns.enabled)
-    monkeypatch.setattr(fo, "preferred_account", lambda: ns.preferred)
-    monkeypatch.setattr(fo, "account_env", lambda n: {})
-    monkeypatch.setattr(fo, "_windows", lambda n, max_age=60.0: ns.windows[n])
-    monkeypatch.setattr(fo, "logged_in", lambda n, cli_path="": n == 1 or ns.logged_in)
-    monkeypatch.setattr(u, "account_credentials_paths", creds)
-    monkeypatch.setattr(a, "account_env", lambda n: {} if n == 1 else {"CLAUDE_CONFIG_DIR": str(dirs[2])})
-    fo._CHECKED.clear()
-    fo._LOGIN.clear()
+    # Other test files reload the app's `backend`: patch the module failover imports now.
+    core = importlib.import_module("backend.agent.accounts")
+    own = tmp_path / "own"
+    (own / "projects").mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(own))
+    monkeypatch.setattr(core, "_data_root", lambda: tmp_path / "data")
+    monkeypatch.setattr(core, "_agent_reg", lambda _agent: {
+        "account_env": lambda d: {"CLAUDE_CONFIG_DIR": str(d)},
+        "account_shared": {"dirs": ["projects"], "files": [], "primary": str(own)},
+    })
+    monkeypatch.setattr(core, "_CURRENT", {})
+    core.rename_account(AGENT, "default", "Account 1")
+    ns = types.SimpleNamespace(core=core, own=own, windows={})
+    monkeypatch.setattr(fo, "_windows", lambda account: ns.windows.get(account))
+
+    def add(label):
+        new_id = core.add_account(AGENT, label, "login")
+        return new_id, core.account_config_dir(AGENT, new_id)
+
+    ns.add = add
+    ns.dir = lambda account: fo.config_dir(account)
     return ns
 
 
@@ -59,104 +60,51 @@ def _row(wid: str, used: float, resets_at: float | None = FUTURE) -> dict:
     return row
 
 
-# ── pick_account ────────────────────────────────────────────────────────
+# ── core's accounts ─────────────────────────────────────────────────────
 
 
-def test_pick_stays_on_account_1_without_account_2(accounts):
-    accounts.windows[1] = [_row("hourly", 100)]
-    assert fo.pick_account() == 1
-    assert not accounts.state.exists()
+def test_one_account_is_not_in_play(accounts):
+    assert not fo.in_play()
+    accounts.add("Home")
+    assert fo.in_play()
 
 
-def test_pick_stays_on_account_1_when_disabled(accounts):
-    accounts.login()
-    accounts.enabled = False
-    accounts.windows[1] = [_row("hourly", 100)]
-    assert fo.pick_account() == 1
+def test_default_account_is_claudes_own_folder(accounts):
+    home, home_dir = accounts.add("Home")
+    assert fo.config_dir("default") == accounts.own
+    assert fo.config_dir(home) == home_dir
+    assert fo.label(home) == "Home" and fo.label("default") == "Account 1"
 
 
-def test_pick_moves_to_account_2_when_account_1_is_full(accounts):
-    accounts.login()
-    accounts.windows[1] = [_row("hourly", 40), _row("weekly", 100, FUTURE)]
-    accounts.windows[2] = [_row("hourly", 10)]
-    assert fo.pick_account() == 2
-    assert fo.exhausted_until(1) == FUTURE
-    # Saved state answers next time, without a usage check.
-    accounts.windows[1] = None
-    assert fo.pick_account() == 2
+def test_tests_stay_off_the_real_accounts(accounts, monkeypatch):
+    accounts.add("Home")
+    monkeypatch.setenv("DUCKY_CLAUDE_FAILOVER", "off")
+    assert not fo.in_play()
 
 
-def test_pick_needs_account_2_logged_in(accounts):
-    accounts.login()
-    accounts.logged_in = False
-    accounts.windows[1] = [_row("hourly", 100)]
-    assert fo.pick_account() == 1
+def test_limit_without_reset_uses_usage_then_fallback(accounts):
+    home, _ = accounts.add("Home")
+    accounts.windows["default"] = [_row("weekly", 100, FUTURE)]
+    fo.report_limit("default")
+    assert accounts.core.exhausted_until(AGENT, "default") == FUTURE
+    fo.report_limit(home)
+    until = accounts.core.exhausted_until(AGENT, home)
+    assert abs(until - (time.time() + fo.FALLBACK_WAIT_S)) < 5
 
 
-def test_pick_both_full_takes_the_earliest_reset(accounts):
-    accounts.login()
-    accounts.windows[1] = [_row("hourly", 100, FUTURE + 500)]
-    accounts.windows[2] = [_row("weekly", 100, FUTURE + 100)]
-    assert fo.pick_account() == 2
-    fo.mark_exhausted(2, FUTURE + 900)
-    assert fo.pick_account() == 1
+def test_next_account_skips_full_ones_and_none_when_all_full(accounts):
+    home, _ = accounts.add("Home")
+    work, _ = accounts.add("Work")
+    fo.report_limit("default", FUTURE)
+    fo.report_limit(home, FUTURE)
+    assert fo.next_account("default")[0] == work
+    fo.report_limit(work, FUTURE + 100)
+    assert fo.next_account(work) == (None, {})  # every account is full: no replay
 
 
-def test_pick_unknown_usage_keeps_account_1(accounts):
-    accounts.login()
-    accounts.windows[1] = None
-    assert fo.pick_account() == 1
-
-
-def test_pick_goes_back_to_account_1_once_its_reset_passed(accounts):
-    accounts.login()
-    fo.mark_exhausted(1, time.time() + 60)
-    assert fo.pick_account() == 2
-    state = json.loads(accounts.state.read_text(encoding="utf-8"))
-    state["accounts"]["1"]["exhausted_until"] = time.time() - 1
-    accounts.state.write_text(json.dumps(state), encoding="utf-8")
-    # Cached bars from before the reset still say 100%: their reset time has passed.
-    accounts.windows[1] = [_row("hourly", 100, time.time() - 5)]
-    assert fo.pick_account() == 1
-
-
-def test_pick_never_raises_and_corrupt_state_is_ignored(accounts, monkeypatch):
-    accounts.login()
-    accounts.state.write_text("{not json", encoding="utf-8")
-    accounts.windows[1] = [_row("hourly", 20)]
-    assert fo.pick_account() == 1
-    monkeypatch.setattr(fo, "account_full", Mock(side_effect=RuntimeError("boom")))
-    assert fo.pick_account() == 1
-
-
-def test_picked_account_2_runs_first_and_falls_back_to_account_1(accounts):
-    accounts.preferred = 2
-    assert fo.pick_account() == 1  # no login for account 2 yet
-    accounts.login()
-    accounts.windows[2] = [_row("hourly", 10)]
-    assert fo.pick_account() == 2 and fo.current_account() == 2
-    accounts.windows[2] = [_row("weekly", 100, FUTURE)]
-    fo._CHECKED.clear()
-    assert fo.pick_account() == 1
-    fo.set_active(1)
-    assert fo.current_account() == 1
-
-
-def test_picked_account_2_without_switching_stays_on_2(accounts):
-    accounts.login()
-    accounts.preferred, accounts.enabled = 2, False
-    accounts.windows[2] = [_row("hourly", 100)]
-    assert fo.in_play() and fo.pick_account() == 2
-
-
-def test_meter_account_follows_saved_state(accounts):
-    assert fo.current_account() == 1
-    accounts.login()
-    fo.mark_exhausted(1, time.time() + 600)
-    fo.set_active(2)
-    assert fo.current_account() == 2
-    fo.set_active(1)
-    assert fo.current_account() == 1
+def test_full_until_ignores_passed_resets():
+    assert fo.full_until([_row("hourly", 100, time.time() - 5)]) is None
+    assert fo.full_until([_row("hourly", 40), _row("weekly", 100, FUTURE)]) == FUTURE
 
 
 # ── limit messages ──────────────────────────────────────────────────────
@@ -195,54 +143,55 @@ def test_reset_epoch_from_the_pipe_form():
     assert fo.limit_reset_epoch("You've hit your limit · resets 3pm") is None
 
 
-def test_limit_hit_without_reset_uses_usage_then_fallback(accounts):
-    accounts.windows[1] = [_row("weekly", 100, FUTURE)]
-    assert fo.note_limit_hit(1) == FUTURE
-    accounts.windows[2] = None
-    until = fo.note_limit_hit(2)
-    assert abs(until - (time.time() + fo.FALLBACK_WAIT_S)) < 5
-
-
 # ── sessions ────────────────────────────────────────────────────────────
 
 
-def test_carry_session_copies_when_missing_or_older(accounts):
-    src = accounts.dirs[1] / "projects" / "C--proj"
+def test_carry_session_copies_when_missing_or_older(tmp_path):
+    one, two = tmp_path / "one", tmp_path / "two"
+    src = one / "projects" / "C--proj"
     src.mkdir(parents=True)
     (src / "sid-1.jsonl").write_text("one\n", encoding="utf-8")
-    assert fo.carry_session("sid-1", 1, 2)
-    dst = accounts.dirs[2] / "projects" / "C--proj" / "sid-1.jsonl"
+    assert fo.carry_session("sid-1", one, two)
+    dst = two / "projects" / "C--proj" / "sid-1.jsonl"
     assert dst.read_text(encoding="utf-8") == "one\n"
-    # Account 2 continued the chat: going back copies its newer transcript.
     dst.write_text("one\ntwo\n", encoding="utf-8")
     os.utime(dst, (time.time() + 10, time.time() + 10))
-    assert fo.carry_session("sid-1", 2, 1)
+    assert fo.carry_session("sid-1", two, one)
     assert (src / "sid-1.jsonl").read_text(encoding="utf-8") == "one\ntwo\n"
-    # An up-to-date copy is left alone.
-    assert fo.carry_session("sid-1", 1, 2)
+    assert fo.carry_session("sid-1", one, two)  # An up-to-date copy is left alone.
     assert dst.read_text(encoding="utf-8") == "one\ntwo\n"
 
 
-def test_replay_carries_the_transcript_from_before_the_failed_turn(accounts):
-    src = accounts.dirs[1] / "projects" / "C--proj"
+def test_replay_carries_the_transcript_from_before_the_failed_turn(tmp_path):
+    one, two = tmp_path / "one", tmp_path / "two"
+    src = one / "projects" / "C--proj"
     src.mkdir(parents=True)
     (src / "sid-1.jsonl").write_text("before\n", encoding="utf-8")
-    before = fo.session_snapshot("sid-1", 1)
+    before = fo.session_snapshot("sid-1", one)
     (src / "sid-1.jsonl").write_text("before\nprompt\nlimit\n", encoding="utf-8")
-    assert fo.carry_session("sid-1", 1, 2, upto=before)
-    assert (accounts.dirs[2] / "projects" / "C--proj" / "sid-1.jsonl").read_text(encoding="utf-8") == "before\n"
+    assert fo.carry_session("sid-1", one, two, upto=before)
+    assert (two / "projects" / "C--proj" / "sid-1.jsonl").read_text(encoding="utf-8") == "before\n"
 
 
-def test_tests_stay_off_the_real_account_2(accounts, monkeypatch):
-    accounts.login()
-    monkeypatch.setenv("DUCKY_CLAUDE_FAILOVER", "off")
-    assert not fo.in_play() and fo.pick_account() == 1
+def test_replay_on_shared_projects_drops_the_failed_attempt(accounts):
+    home, home_dir = accounts.add("Home")
+    accounts.core.coding_agent_account_env(AGENT)  # links the shared projects folder
+    accounts.core.set_active_account(AGENT, home)
+    accounts.core.coding_agent_account_env(AGENT)
+    shared = accounts.own / "projects" / "C--proj"
+    shared.mkdir()
+    (shared / "sid-1.jsonl").write_text("before\n", encoding="utf-8")
+    before = fo.session_snapshot("sid-1", accounts.own)
+    (shared / "sid-1.jsonl").write_text("before\nprompt\nlimit\n", encoding="utf-8")
+    assert fo.carry_session("sid-1", accounts.own, home_dir, upto=before)
+    assert (shared / "sid-1.jsonl").read_text(encoding="utf-8") == "before\n"
+    assert (home_dir / "projects" / "C--proj" / "sid-1.jsonl").read_text(encoding="utf-8") == "before\n"
 
 
-def test_carry_session_rejects_missing_and_bad_ids(accounts):
-    assert not fo.carry_session("nope", 1, 2)
-    assert not fo.carry_session("", 1, 2)
-    assert not fo.carry_session("../evil", 1, 2)
+def test_carry_session_rejects_missing_and_bad_ids(tmp_path):
+    assert not fo.carry_session("nope", tmp_path / "a", tmp_path / "b")
+    assert not fo.carry_session("", tmp_path / "a", tmp_path / "b")
+    assert not fo.carry_session("../evil", tmp_path / "a", tmp_path / "b")
 
 
 # ── usage per account ───────────────────────────────────────────────────
@@ -258,34 +207,41 @@ class _Resp:
         return self._body
 
 
-def _reset_usage():
-    u._LAST_WINDOWS, u._BLOCKED_UNTIL = [], 0.0
-    u._ACCOUNT2_LAST, u._ACCOUNT2_BLOCKED_UNTIL = [], 0.0
-    u._FETCHED_AT.clear()
+@pytest.fixture
+def usage_clean(monkeypatch):
+    monkeypatch.setattr(u, "_LAST_WINDOWS", [])
+    monkeypatch.setattr(u, "_BLOCKED_UNTIL", 0.0)
+    monkeypatch.setattr(u, "_DIR_LAST", {})
+    monkeypatch.setattr(u, "_DIR_BLOCKED_UNTIL", {})
+    monkeypatch.setattr(u, "_FETCHED_AT", {})
 
 
-def test_account_2_reads_only_its_own_credentials(accounts, monkeypatch):
+def _login(folder: Path, token: str) -> None:
+    (folder / ".credentials.json").write_text(json.dumps({"claudeAiOauth": {"accessToken": token}}), encoding="utf-8")
+
+
+def test_account_folder_reads_only_its_own_credentials(accounts, usage_clean, monkeypatch):
     import httpx
 
-    _reset_usage()
+    _, home_dir = accounts.add("Home")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-token")
     seen: list[str] = []
     monkeypatch.setattr(httpx, "get", lambda url, headers=None, **k: seen.append(headers["Authorization"]) or _Resp(
         200, {"five_hour": {"utilization": 1, "resets_at": "2033-05-18T03:33:20+00:00"}}))
-    assert u.account_windows(2) is None and not seen
-    accounts.login(2)
-    rows = u.account_windows(2)
+    assert u.account_windows(str(home_dir)) is None and not seen
+    _login(home_dir, "tok2")
+    rows = u.account_windows(str(home_dir))
     assert seen == ["Bearer tok2"]
     assert rows[0]["used"] == 100 and rows[0]["resets_at"] == FUTURE
-    u.account_windows(2)
+    u.account_windows(str(home_dir))
     assert len(seen) == 1  # reused for a minute
 
 
-def test_429_blocks_are_per_account(accounts, monkeypatch):
+def test_429_blocks_are_per_account(accounts, usage_clean, monkeypatch):
     import httpx
 
-    _reset_usage()
-    accounts.login(2)
+    _, home_dir = accounts.add("Home")
+    _login(home_dir, "tok2")
     monkeypatch.setattr(u, "_load_claude_oauth", lambda: (None, {}, {"accessToken": "tok1"}))
     calls: list[str] = []
 
@@ -296,81 +252,46 @@ def test_429_blocks_are_per_account(accounts, monkeypatch):
         return _Resp(200, {"seven_day": {"utilization": 0.5, "resets_at": FUTURE}})
 
     monkeypatch.setattr(httpx, "get", fake_get)
-    assert u.account_windows(1, max_age=0) is None
-    assert u._BLOCKED_UNTIL > time.time() and u._ACCOUNT2_BLOCKED_UNTIL == 0.0
-    assert u.account_windows(2, max_age=0)[0]["used"] == 50
-    u.account_windows(1, max_age=0)
+    assert u.account_windows(u.PRIMARY, max_age=0) is None
+    assert u._BLOCKED_UNTIL > time.time() and not u._DIR_BLOCKED_UNTIL
+    assert u.account_windows(str(home_dir), max_age=0)[0]["used"] == 50
+    u.account_windows(u.PRIMARY, max_age=0)
     assert calls == ["Bearer tok1", "Bearer tok2"]
 
 
-def test_refreshed_account_2_token_is_saved_to_its_file(accounts, monkeypatch):
+def test_refreshed_token_is_saved_to_the_accounts_file(accounts, usage_clean, monkeypatch):
     import httpx
 
-    _reset_usage()
-    path = accounts.dirs[2] / ".credentials.json"
+    _, home_dir = accounts.add("Home")
+    path = home_dir / ".credentials.json"
     path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "old", "refreshToken": "r", "expiresAt": 1}}),
                     encoding="utf-8")
     monkeypatch.setattr(u, "_refresh_claude_oauth", lambda oauth: {**oauth, "accessToken": "new", "expiresAt": 9e12})
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp(200, {"five_hour": {"utilization": 0.1}}))
-    assert u.account_windows(2, max_age=0)
+    assert u.account_windows(str(home_dir), max_age=0)
     assert json.loads(path.read_text(encoding="utf-8"))["claudeAiOauth"]["accessToken"] == "new"
 
 
-def test_meter_labels_account_2(accounts, monkeypatch):
+def test_meter_shows_the_running_account_and_sends_no_switch(accounts, usage_clean, monkeypatch):
     import httpx
 
-    _reset_usage()
     monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp(200, {"five_hour": {"utilization": 0.2}}))
-    monkeypatch.setattr(fo, "current_account", lambda: 2)
-    accounts.login(2)
-    out = u.fetch_usage("")
-    assert out["windows"][0]["label"] == "Account 2 · 5-hour limit"
-    assert out["switch"]["value"] == "1" and out["switch"]["rpc"] == "set_claude_account"
-    assert [o["id"] for o in out["switch"]["options"]] == ["1", "2"]
-    monkeypatch.setattr(fo, "current_account", lambda: 1)
     monkeypatch.setattr(u, "_load_claude_oauth", lambda: (None, {}, {"accessToken": "tok1"}))
-    assert u.fetch_usage("")["windows"][0]["label"] == "Account 1 · 5-hour limit"
-    (accounts.dirs[2] / ".credentials.json").unlink()
+    assert u.fetch_usage("")["windows"][0]["label"] == "5-hour limit"  # one account: no prefix
+    work, work_dir = accounts.add("Work")
+    _login(work_dir, "tok3")
+    accounts.core.set_active_account(AGENT, work)
+    accounts.core.coding_agent_account_env(AGENT)
     out = u.fetch_usage("")
-    assert out["windows"][0]["label"] == "5-hour limit" and "switch" not in out
-
-
-def test_share_config_links_account_1_folders_and_copies_its_files(tmp_path):
-    one, two = tmp_path / "one", tmp_path / "two"
-    (one / "skills" / "verse").mkdir(parents=True)
-    (one / "settings.json").write_text('{"hooks": {}}', encoding="utf-8")
-    (two / "agents").mkdir(parents=True)  # a real folder account 2 already has stays its own
-    (one / "agents").mkdir()
-    acc.share_config(one, two)
-    assert (two / "skills" / "verse").is_dir()
-    assert (one / "projects").is_dir() and (two / "projects").is_dir()
-    (two / "projects" / "C--p").mkdir()
-    assert (one / "projects" / "C--p").is_dir()  # same folder: sessions are shared
-    assert not os.path.samefile(one / "agents", two / "agents")
-    assert (two / "settings.json").read_text(encoding="utf-8") == '{"hooks": {}}'
-    assert not (two / ".credentials.json").exists()
-    acc.share_config(one, two)  # again: nothing breaks
-
-
-def test_replay_on_shared_projects_drops_the_failed_attempt(accounts, tmp_path):
-    shared = tmp_path / "shared" / "C--proj"
-    shared.mkdir(parents=True)
-    acc._link_dir(tmp_path / "shared", accounts.dirs[1] / "projects")
-    acc._link_dir(tmp_path / "shared", accounts.dirs[2] / "projects")
-    (shared / "sid-1.jsonl").write_text("before\n", encoding="utf-8")
-    before = fo.session_snapshot("sid-1", 1)
-    (shared / "sid-1.jsonl").write_text("before\nprompt\nlimit\n", encoding="utf-8")
-    assert fo.carry_session("sid-1", 1, 2, upto=before)
-    assert (shared / "sid-1.jsonl").read_text(encoding="utf-8") == "before\n"
-    assert fo.carry_session("sid-1", 2, 1)
-    assert (shared / "sid-1.jsonl").read_text(encoding="utf-8") == "before\n"
+    assert out["windows"][0]["label"] == "Work · 5-hour limit"
+    assert "switch" not in out  # core builds the picker's account switch
 
 
 # ── adapter ─────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
-def launch(tmp_path, monkeypatch):
+def launch(tmp_path, monkeypatch, accounts):
     from frontend.settings import PanelSettings
 
     calls, events, script = [], [], []
@@ -391,10 +312,12 @@ def launch(tmp_path, monkeypatch):
     monkeypatch.setattr(a, "run_streaming_process", process)
     kwargs = dict(prompt="user payload", system_prompt="", cwd=str(tmp_path), conv_id="test",
                   model="sonnet", mcp_config_path=str(config), extra_args="", cli_path="",
-                  env={"MOCK_ENV": "kept"}, push=events.append)
+                  push=events.append)
 
     def run(session=""):
-        return a.ClaudeCodeAdapter().launch(**dict(kwargs, session_id=session))
+        # Core's runner picks the account and adds its env before launch.
+        env = {"MOCK_ENV": "kept", **accounts.core.coding_agent_account_env(AGENT)}
+        return a.ClaudeCodeAdapter().launch(**dict(kwargs, session_id=session, env=env))
 
     return types.SimpleNamespace(run=run, calls=calls, events=events, script=script)
 
@@ -432,11 +355,25 @@ def ok_turn(kw):
     return ProcResult(returncode=0)
 
 
-def test_limit_error_retries_once_on_account_2(accounts, launch):
-    accounts.login()
-    accounts.windows[1] = [_row("hourly", 50)]
-    accounts.windows[2] = [_row("hourly", 10)]
-    session = accounts.dirs[1] / "projects" / "C--proj"
+def _texts(launch):
+    return [str(e.get("text")) for e in launch.events]
+
+
+def test_first_two_full_turn_runs_on_the_third(accounts, launch):
+    home, _ = accounts.add("Home")
+    work, work_dir = accounts.add("Work")
+    accounts.core.mark_exhausted(AGENT, "default", FUTURE)
+    accounts.core.mark_exhausted(AGENT, home, FUTURE)
+    launch.script[:] = [ok_turn]
+    assert launch.run().ok
+    assert launch.calls[0]["env_extra"]["CLAUDE_CONFIG_DIR"] == str(work_dir)
+    assert "Account 1 is at its limit — continuing on Work…" in _texts(launch)
+
+
+def test_limit_replays_once_on_the_next_account(accounts, launch):
+    home, home_dir = accounts.add("Home")
+    accounts.add("Work")
+    session = accounts.own / "projects" / "C--proj"
     session.mkdir(parents=True)
     (session / "prior.jsonl").write_text("{}\n", encoding="utf-8")
     launch.script[:] = [limit_turn, ok_turn]
@@ -444,42 +381,38 @@ def test_limit_error_retries_once_on_account_2(accounts, launch):
     assert result.ok and result.reply_text == "answer"
     first, second = launch.calls
     assert "CLAUDE_CONFIG_DIR" not in first["env_extra"]
-    assert second["env_extra"]["CLAUDE_CONFIG_DIR"] == str(accounts.dirs[2])
+    assert second["env_extra"]["CLAUDE_CONFIG_DIR"] == str(home_dir)
     assert second["env_extra"]["MOCK_ENV"] == "kept"
     assert second["argv"][second["argv"].index("--resume") + 1] == "prior"
-    assert (accounts.dirs[2] / "projects" / "C--proj" / "prior.jsonl").is_file()
-    assert fo.exhausted_until(1) == FUTURE
-    assert any("Account 1 is at its limit — continuing on account 2" in str(e.get("text")) for e in launch.events)
-    # The next message starts on account 2 straight away.
+    assert (home_dir / "projects" / "C--proj" / "prior.jsonl").is_file()
+    assert accounts.core.exhausted_until(AGENT, "default") == FUTURE
+    assert "Account 1 is at its limit — continuing on Home…" in _texts(launch)
+    # The next message starts on Home straight away.
     launch.script[:] = [ok_turn]
     assert launch.run("sid-1").ok
-    assert launch.calls[2]["env_extra"]["CLAUDE_CONFIG_DIR"] == str(accounts.dirs[2])
+    assert launch.calls[2]["env_extra"]["CLAUDE_CONFIG_DIR"] == str(home_dir)
 
 
-def test_limit_on_both_accounts_retries_only_once(accounts, launch):
-    accounts.login()
-    accounts.windows[1] = [_row("hourly", 50)]
-    accounts.windows[2] = [_row("hourly", 10)]
+def test_limit_on_the_replay_too_stops_after_one_replay(accounts, launch):
+    accounts.add("Home")
+    accounts.add("Work")
     launch.script[:] = [limit_turn, limit_turn]
     result = launch.run()
     assert not result.ok and len(launch.calls) == 2
     assert "usage limit reached" in result.error
 
 
-def test_no_retry_after_streamed_work(accounts, launch):
-    accounts.login()
-    accounts.windows[1] = [_row("hourly", 50)]
-    accounts.windows[2] = [_row("hourly", 10)]
+def test_no_replay_after_streamed_work(accounts, launch):
+    accounts.add("Home")
     launch.script[:] = [lambda kw: limit_turn(kw, work=True)]
     result = launch.run()
     assert not result.ok and len(launch.calls) == 1
-    assert "Your next message will use account 2." in result.error
-    assert fo.exhausted_until(1) == FUTURE
+    assert "Account 1 is at its limit. Your next message will use Home." in result.error
+    assert accounts.core.exhausted_until(AGENT, "default") == FUTURE
 
 
-def test_model_prose_about_limits_is_not_a_limit(accounts, launch):
-    accounts.login()
-    accounts.windows[1] = [_row("hourly", 50)]
+def test_model_prose_about_limits_never_marks(accounts, launch):
+    accounts.add("Home")
 
     def failed_turn(kw):
         _init(kw)
@@ -493,27 +426,15 @@ def test_model_prose_about_limits_is_not_a_limit(accounts, launch):
     launch.script[:] = [failed_turn]
     result = launch.run()
     assert not result.ok and len(launch.calls) == 1
-    assert fo.exhausted_until(1) == 0.0
+    assert accounts.core.exhausted_until(AGENT, "default") is None
     assert "next message" not in (result.error or "")
 
 
-def test_picked_account_2_says_so_once(accounts, launch):
-    accounts.login()
-    accounts.preferred = 2
-    accounts.windows[2] = [_row("hourly", 10)]
-    launch.script[:] = [ok_turn, ok_turn]
-    assert launch.run().ok and launch.run("sid-1").ok
-    assert all(c["env_extra"]["CLAUDE_CONFIG_DIR"] == str(accounts.dirs[2]) for c in launch.calls)
-    texts = [str(e.get("text")) for e in launch.events]
-    assert texts.count("Running on account 2.") == 1
-    assert not any("at its limit" in t for t in texts)
-
-
-def test_account_1_env_unchanged_without_account_2(accounts, launch):
+def test_one_account_keeps_the_env_and_marks_nothing(accounts, launch):
     launch.script[:] = [limit_turn]
     result = launch.run()
     assert not result.ok and len(launch.calls) == 1
     assert launch.calls[0]["env_extra"] == a.claude_env({"MOCK_ENV": "kept"})
     assert "next message" not in (result.error or "")
-    assert not accounts.state.exists()
-    assert not any("account 2" in str(e.get("text")) for e in launch.events)
+    assert accounts.core.exhausted_until(AGENT, "default") is None
+    assert not any("at its limit" in t for t in _texts(launch))

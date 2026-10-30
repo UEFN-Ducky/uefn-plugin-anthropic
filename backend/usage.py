@@ -9,19 +9,20 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from .accounts import PRIMARY, SECONDARY, account_credentials_paths, account_label, normalize_account
+    from .accounts import PRIMARY
 except ImportError:
-    from accounts import PRIMARY, SECONDARY, account_credentials_paths, account_label, normalize_account
+    from accounts import PRIMARY
 
-# Account 1's last bars and 429 block; account 2 keeps its own in _ACCOUNT2_*.
+# Claude Code's own login's last bars and 429 block (core accounts keep theirs in _DIR_*).
 _LAST_WINDOWS: list[dict[str, Any]] = []
 # Anthropic's plan-usage endpoint answers 429 with Retry-After (often 30+ min). Calling it
 # again before then only extends the block, so wait it out and show the last bars.
 _BLOCKED_UNTIL = 0.0
-_ACCOUNT2_LAST: list[dict[str, Any]] = []
-_ACCOUNT2_BLOCKED_UNTIL = 0.0
+# Core accounts are keyed by their config folder (a str) instead of 1 / 2.
+_DIR_LAST: dict[str, list[dict[str, Any]]] = {}
+_DIR_BLOCKED_UNTIL: dict[str, float] = {}
 # When each account's plan windows were last read from Anthropic (time.time()).
-_FETCHED_AT: dict[int, float] = {}
+_FETCHED_AT: dict[Any, float] = {}
 _PAIRS = (
     (
         "anthropic-ratelimit-requests-remaining",
@@ -297,9 +298,9 @@ def _load_claude_oauth() -> tuple[Path | None, dict[str, Any], dict[str, Any]]:
 
 
 def _load_account_oauth(account: int) -> tuple[Path | None, dict[str, Any], dict[str, Any]]:
-    """Account 1: Claude Code's usual login. Account 2: only its own credentials file."""
-    if account == SECONDARY:
-        return _read_oauth(account_credentials_paths(SECONDARY))
+    """PRIMARY: Claude Code's usual login. A core account's config folder: only its own credentials file."""
+    if isinstance(account, str):
+        return _read_oauth([Path(account) / ".credentials.json", Path(account) / "credentials.json"])
     return _load_claude_oauth()
 
 
@@ -354,17 +355,21 @@ def _refresh_claude_oauth(oauth: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _last(account: int = PRIMARY) -> list[dict[str, Any]]:
-    return _ACCOUNT2_LAST if account == SECONDARY else _LAST_WINDOWS
+    if isinstance(account, str):
+        return _DIR_LAST.get(account, [])
+    return _LAST_WINDOWS
 
 
 def _blocked_until(account: int = PRIMARY) -> float:
-    return _ACCOUNT2_BLOCKED_UNTIL if account == SECONDARY else _BLOCKED_UNTIL
+    if isinstance(account, str):
+        return _DIR_BLOCKED_UNTIL.get(account, 0.0)
+    return _BLOCKED_UNTIL
 
 
 def _keep(rows: list[dict[str, Any]], account: int = PRIMARY) -> dict[str, Any]:
-    global _LAST_WINDOWS, _ACCOUNT2_LAST
-    if account == SECONDARY:
-        _ACCOUNT2_LAST = list(rows)
+    global _LAST_WINDOWS
+    if isinstance(account, str):
+        _DIR_LAST[account] = list(rows)
     else:
         _LAST_WINDOWS = list(rows)
     return {"windows": _last(account)}
@@ -385,12 +390,12 @@ def _last_or_blocked(account: int = PRIMARY) -> dict[str, Any]:
 
 
 def _block_from(r: Any, account: int = PRIMARY) -> None:
-    global _BLOCKED_UNTIL, _ACCOUNT2_BLOCKED_UNTIL
+    global _BLOCKED_UNTIL
     headers = getattr(r, "headers", None) or {}
     wait = _num(headers.get("retry-after"))
     until = time.time() + (wait if wait is not None and wait > 0 else 300.0)
-    if account == SECONDARY:
-        _ACCOUNT2_BLOCKED_UNTIL = until
+    if isinstance(account, str):
+        _DIR_BLOCKED_UNTIL[account] = until
     else:
         _BLOCKED_UNTIL = until
 
@@ -466,8 +471,8 @@ def account_windows(account: int, *, max_age: float = 60.0) -> list[dict[str, An
     """This account's 5-hour / weekly rows, reused for ``max_age`` s; None when unknown.
 
     Unknown = not logged in, login expired, network error, or blocked with nothing cached.
+    ``account`` is PRIMARY or a core account's config folder (str).
     """
-    account = normalize_account(account)
     if max_age > 0 and time.time() - _FETCHED_AT.get(account, 0.0) < max_age:
         return list(_last(account))
     status, rows = _plan_usage(account, timeout=4.0)
@@ -486,45 +491,22 @@ def _failover() -> Any:
     return failover
 
 
-def _meter_account() -> int:
-    try:
-        return _failover().current_account()
-    except Exception:
-        return PRIMARY
-
-
-def _account_switch() -> dict[str, Any] | None:
-    """The model picker's Account 1 / Account 2 toggle; None until account 2 is logged in."""
+def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
+    """The bars of the account Claude Code runs as; core adds the account switch itself."""
     try:
         fo = _failover()
-        if not fo.account2_ready():
-            return None
-        value = str(fo.preferred())
+        if not fo.in_play():
+            return _usage_for(PRIMARY, api_key)
+        account = fo.current_account()
+        folder = fo.config_dir(account) if account != "default" else None
+        out = _usage_for(str(folder) if folder else PRIMARY, api_key)
+        return _for_account(out, fo.label(account))
     except Exception:
-        return None
-    return {
-        "plugin_id": "anthropic",
-        "rpc": "set_claude_account",
-        "value": value,
-        "options": [{"id": str(n), "label": account_label(n)} for n in (PRIMARY, SECONDARY)],
-    }
+        return _usage_for(PRIMARY, api_key)
 
 
-def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
-    account = _meter_account()
-    switch = _account_switch()
-    out = _usage_for(account, api_key)
-    if switch is None:
-        return out
-    # Account 2's rows are labelled already; label account 1's too once there are two.
-    return {**(out if account == SECONDARY else _for_account(out, account, always=True)), "switch": switch}
-
-
-def _for_account(out: dict[str, Any], account: int, *, always: bool = False) -> dict[str, Any]:
-    """Bars and notices say which account they are about (account 2, or both once two exist)."""
-    if account != SECONDARY and not always:
-        return out
-    prefix = account_label(account)
+def _for_account(out: dict[str, Any], prefix: str) -> dict[str, Any]:
+    """Bars and notices say which account they are about once there are two or more."""
     out = dict(out)
     out["windows"] = [{**row, "label": f"{prefix} · {row.get('label') or ''}"} for row in out.get("windows") or []]
     if isinstance(out.get("notice"), dict):
@@ -532,23 +514,23 @@ def _for_account(out: dict[str, Any], account: int, *, always: bool = False) -> 
     return out
 
 
-def _usage_for(account: int, api_key: str) -> dict[str, Any]:
+def _usage_for(account: Any, api_key: str) -> dict[str, Any]:
     key = (api_key or "").strip() if account == PRIMARY else ""
     status, rows = _plan_usage(account, keep_expired=bool(key))
     if status == "ok":
-        return _for_account({"windows": list(rows)}, account)
+        return {"windows": list(rows)}
     if status == "blocked":
-        return _for_account(_last_or_blocked(account), account)
+        return _last_or_blocked(account)
     if status == "expired":
-        return _for_account(_notice("Claude login expired. Log in to see 5-hour and weekly limits."), account)
+        return _notice("Claude login expired. Log in to see 5-hour and weekly limits.")
     if not key:
         if status == "failed":
-            return _for_account(_notice(
+            return _notice(
                 "Couldn't read Claude plan limits. Log in again, or press Refresh.",
                 action="retry",
                 label="Refresh",
-            ), account)
-        return _for_account(_notice("Log in with Claude Code to see 5-hour and weekly limits."), account)
+            )
+        return _notice("Log in with Claude Code to see 5-hour and weekly limits.")
     try:
         import httpx
 

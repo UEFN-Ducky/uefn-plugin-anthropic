@@ -26,7 +26,6 @@ from backend.agent.coding_agents.base import (
     CodingAgentInfo,
     CodingAgentLaunchResult,
 )
-from .accounts import PRIMARY, SECONDARY, account_env, account_label
 from .claude_auth import is_claude_logged_in, resolve_claude_bin
 from . import failover
 from backend.agent.coding_agents.cli_shared import finalize_cli_turn, truncate_tool_result
@@ -534,13 +533,8 @@ def claude_env(env: dict[str, str]) -> dict[str, str]:
     return out
 
 
-def _account_run_env(env: dict[str, str], account: int) -> dict[str, str]:
-    """Turn env for this Claude account; account 1 keeps the env exactly as given."""
-    return env if account == PRIMARY else {**env, **account_env(account)}
-
-
-def _switch_text(from_account: int, to_account: int) -> str:
-    return f"{account_label(from_account)} is at its limit — continuing on {account_label(to_account).lower()}…"
+def _switch_text(from_account: str, to_account: str) -> str:
+    return f"{failover.label(from_account)} is at its limit — continuing on {failover.label(to_account)}…"
 
 
 def _quiet_attempt(state: "_StreamState", blocks: list[dict[str, Any]], streamed: str) -> bool:
@@ -1323,16 +1317,16 @@ class ClaudeCodeAdapter:
                 image_dirs=image_dirs,
                 auto_compact_window=auto_compact_window(),
             )
-            # The picked account runs this turn; the other one while it is at its plan limit.
-            account = failover.pick_account(cli_path)
-            previous_account = failover.begin_turn(account, session_id)
-            run_env = _account_run_env(env, account)
-            picked = failover.preferred()
-            if account != picked:
-                push({"type": "status", "text": _switch_text(picked, account), "conv_id": conv_id, "run_id": run_id})
-            elif previous_account != account:
-                push({"type": "status", "text": f"Running on {account_label(account).lower()}.",
-                      "conv_id": conv_id, "run_id": run_id})
+            # Core picked the account (its CLAUDE_CONFIG_DIR is in env): the picked one, or the
+            # next while that one is at its plan limit.
+            accounts_on = failover.in_play()
+            account = failover.current_account() if accounts_on else ""
+            run_env = env
+            if accounts_on:
+                failover.gather_session(session_id, failover.config_dir(account))
+                picked = failover.picked_account()
+                if account != picked:
+                    push({"type": "status", "text": _switch_text(picked, account), "conv_id": conv_id, "run_id": run_id})
             switched_account = False
             # Core asks for this when the session is big and its prompt cache has expired.
             if session_id and env.get("DUCKY_COMPACT_FIRST") == "1" and not cancelled():
@@ -1342,8 +1336,8 @@ class ClaudeCodeAdapter:
                     at = argv.index("--resume") + 1
                     argv = [*argv[:at], compacted, *argv[at + 1:]]
                     session_id = compacted
-            # The transcript before this turn, for a replay on the other account.
-            session_before = failover.session_snapshot(session_id, account) if failover.in_play() else {}
+            # The transcript before this turn, for a replay on the next account.
+            session_before = failover.session_snapshot(session_id, failover.config_dir(account)) if accounts_on else {}
             stdin_payload = full_prompt
             updated = False
             previous_result = None
@@ -1411,23 +1405,22 @@ class ClaudeCodeAdapter:
                     # Only Claude's own message came back; once the model ran, its prose may quote a limit.
                     texts += (state.final_text, state.trailing_text())
                 if (not terminal and not cancelled() and (not result.ok or quiet)
-                        and failover.is_usage_limit_error(*texts) and failover.in_play()):
-                    failover.note_limit_hit(account, failover.limit_reset_epoch(*texts))
-                    other = failover.other_account(account)
-                    can_switch = not switched_account and failover.can_switch_to(other, cli_path)
-                    if can_switch and quiet:
-                        # Nothing ran yet: replay the same turn on the other account.
+                        and failover.is_usage_limit_error(*texts) and accounts_on):
+                    failover.report_limit(account, failover.limit_reset_epoch(*texts))
+                    other, other_env = (None, {}) if switched_account else failover.next_account(account)
+                    if other and quiet:
+                        # Nothing ran yet: replay the same turn once, on core's next account.
                         if session_id:
-                            failover.carry_session(session_id, account, other, upto=session_before)
-                        failover.set_active(other)
+                            failover.carry_session(session_id, failover.config_dir(account),
+                                                   failover.config_dir(other), upto=session_before)
                         push({"type": "status", "text": _switch_text(account, other),
                               "conv_id": conv_id, "run_id": run_id})
-                        account, run_env, switched_account = other, _account_run_env(env, other), True
+                        account, run_env, switched_account = other, failover.run_env(env, other_env), True
                         continue
-                    if can_switch and not result.ok:
+                    if other and not result.ok:
                         result.error = (
-                            f"{result.error or 'Claude Code turn failed'}\n\n{account_label(account)} is at its "
-                            f"limit. Your next message will use {account_label(other).lower()}."
+                            f"{result.error or 'Claude Code turn failed'}\n\n{failover.label(account)} is at its "
+                            f"limit. Your next message will use {failover.label(other)}."
                         )
                         return result
                 if terminal or partial_failure or cancelled() or result.ok:

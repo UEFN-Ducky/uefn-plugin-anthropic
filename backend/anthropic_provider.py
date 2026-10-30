@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, AsyncIterator
 
 from backend.agent.multimodal_content import build_anthropic_user_content
@@ -23,6 +24,18 @@ from backend.agent.thinking_effort import normalize_thinking_effort
 # Exact budget_tokens this plugin sends. Host does not own these numbers.
 BUDGET = {"low": 2048, "medium": 8192, "high": 16384}
 _EFFORT_BUDGET = BUDGET
+
+# Core's default (429 / rate limit / quota) plus Anthropic's empty-balance 400, which has no
+# status word core knows: "Your credit balance is too low to access the Anthropic API".
+# Not 529 overloaded_error: that is Anthropic's side, another key won't help.
+_QUOTA_RE = re.compile(
+    r"\b429\b|rate[_ ]?limit|insufficient_quota|quota|credit balance is too low",
+    re.IGNORECASE,
+)
+
+
+def is_quota_error(text: str) -> bool:
+    return bool(_QUOTA_RE.search(text or ""))
 
 
 class AnthropicProvider:

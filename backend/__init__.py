@@ -265,6 +265,87 @@ def _logout(*, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
     return claude_logout(cli_path)
 
 
+# Core's account registry runs Claude Code as any login: each account is a
+# CLAUDE_CONFIG_DIR (None = the CLI's own folder, the "default" account).
+
+
+def _account_cli() -> str:
+    """The Claude Code CLI path set in Settings, or '' for the default lookup."""
+    try:
+        from backend.agent.coding_agents.settings_helpers import coding_agent_cfg
+        from frontend.settings import PanelSettings
+
+        return str(coding_agent_cfg(PanelSettings.load(), "claude_code").get("cli_path") or "")
+    except Exception:
+        return ""
+
+
+def _account_env(config_dir: Any) -> dict[str, str]:
+    return {"CLAUDE_CONFIG_DIR": str(config_dir)} if config_dir else {}
+
+
+def _account_login(config_dir: Any) -> dict[str, Any]:
+    from .claude_auth import resolve_claude_bin
+
+    binary = resolve_claude_bin(_account_cli())
+    if not binary:
+        raise ValueError("Claude Code CLI not found.")
+    return {"argv": [binary, "auth", "login"], "env": _account_env(config_dir)}
+
+
+def _account_status(config_dir: Any) -> dict[str, Any]:
+    from .claude_auth import claude_auth_status
+
+    s = claude_auth_status(_account_cli(), config_dir=config_dir)
+    out: dict[str, Any] = {"loggedIn": bool(s.get("loggedIn"))}
+    if s.get("email"):
+        out["email"] = s["email"]
+    plan = s.get("subscriptionType") or s.get("plan")
+    if plan:
+        out["plan"] = plan
+    return out
+
+
+def _account_logout(config_dir: Any) -> dict[str, Any]:
+    from .claude_auth import claude_logout
+
+    return claude_logout(_account_cli(), config_dir=config_dir)
+
+
+def _account_usage(config_dir: Any) -> Any:
+    from .accounts import PRIMARY
+    from .usage import account_windows
+
+    return account_windows(str(config_dir) if config_dir else PRIMARY) or []
+
+
+def _account_primary() -> str:
+    from .accounts import PRIMARY, account_config_dir
+
+    folder = account_config_dir(PRIMARY)
+    try:
+        (folder / "projects").mkdir(parents=True, exist_ok=True)  # So every account links one sessions folder.
+    except OSError:
+        pass
+    return str(folder)
+
+
+def account_hooks() -> dict[str, Any]:
+    """The ``register_coding_agent`` extras core's account registry calls."""
+    from .accounts import SHARED_DIRS, SHARED_FILES
+    from .failover import is_usage_limit_error
+
+    return {
+        "account_env": _account_env,
+        "account_login": _account_login,
+        "account_status": _account_status,
+        "account_logout": _account_logout,
+        "account_usage": _account_usage,
+        "account_shared": {"dirs": list(SHARED_DIRS), "files": list(SHARED_FILES), "primary": _account_primary},
+        "is_limit_error": is_usage_limit_error,
+    }
+
+
 def _cache_ttl_s() -> int:
     """Prefix-cache TTL: 1h when Settings → extendedCacheTtl is on (plugin default)."""
     try:
@@ -278,7 +359,7 @@ def _cache_ttl_s() -> int:
 
 
 def register(api) -> None:
-    from .anthropic_provider import AnthropicProvider
+    from .anthropic_provider import AnthropicProvider, is_quota_error
     from .claude_code_adapter import ClaudeCodeAdapter
 
     from .model_fetch import clear_model_cache
@@ -295,6 +376,7 @@ def register(api) -> None:
         cache_ttl_s=_cache_ttl_s,
         cost_mode="inclusive_input",
         shows_thinking_effort=True,
+        is_quota_error=is_quota_error,
     )
     api.register_coding_agent(
         "claude_code",
@@ -327,7 +409,15 @@ def register(api) -> None:
         # Every approval mode of a chat's permissions button works here: Ask before
         # changes, Accept edits and Allow everything.
         chat_permission_modes=("ask", "edits", "all"),
+        **account_hooks(),
     )
+    try:
+        from .accounts import migrate_account2
+
+        if migrate_account2():
+            api.log("Moved Claude account 2 into Settings accounts as \"Account 2\"")
+    except Exception:
+        pass
     api.register_ide_hookup("claude", label="Claude")
     try:
         from .cli_update import schedule_cli_update_on_plugin_load
@@ -338,8 +428,4 @@ def register(api) -> None:
     from . import graph_nodes
 
     graph_nodes.register_nodes(api)
-    from .account_rpc import register_account_rpcs
-
-    # Settings → "Second Claude account": log in / status / log out of account 2.
-    register_account_rpcs(api)
     api.log("Anthropic gateway contribution active (Providers + Claude Code + IDE)")
