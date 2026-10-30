@@ -438,12 +438,16 @@ def test_cancel_at_parser_boundary_never_replays(launch, monkeypatch, marker):
     launch.update.assert_not_called()
 
 
-def test_cancel_from_start_status_prevents_process(launch):
+def test_cancel_before_launch_prevents_process_and_no_start_status(launch):
+    events: list[dict] = []
     cancel = threading.Event()
-    result = launch.run(cancel=cancel, push=lambda event: cancel.set())
+    cancel.set()
+    result = launch.run(cancel=cancel, push=events.append)
     assert result.status == "cancelled" and not launch.calls
     assert result.requested_mode == "agent" and result.effective_mode == ""
     launch.update.assert_not_called()
+    # No "Starting Claude Code…" / "Resumed Claude Code session…" bar in the chat.
+    assert not any("Claude Code" in str(e.get("text")) for e in events if e.get("type") == "status")
 
 
 def test_safe_error_only_json_repair_is_bounded(launch, monkeypatch):

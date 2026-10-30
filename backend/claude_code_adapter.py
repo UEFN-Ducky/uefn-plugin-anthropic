@@ -1323,11 +1323,6 @@ class ClaudeCodeAdapter:
                 image_dirs=image_dirs,
                 auto_compact_window=auto_compact_window(),
             )
-            push({
-                "type": "status",
-                "text": "Resumed Claude Code session…" if session_id else "Starting Claude Code…",
-                "conv_id": conv_id, "run_id": run_id,
-            })
             # The picked account runs this turn; the other one while it is at its plan limit.
             account = failover.pick_account(cli_path)
             previous_account = failover.begin_turn(account, session_id)
