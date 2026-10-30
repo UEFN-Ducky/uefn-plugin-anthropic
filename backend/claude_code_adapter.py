@@ -26,7 +26,9 @@ from backend.agent.coding_agents.base import (
     CodingAgentInfo,
     CodingAgentLaunchResult,
 )
+from .accounts import PRIMARY, SECONDARY, account_env, account_label
 from .claude_auth import is_claude_logged_in, resolve_claude_bin
+from . import failover
 from backend.agent.coding_agents.cli_shared import finalize_cli_turn, truncate_tool_result
 from backend.agent.coding_agents import proc_exec as _proc_exec
 from backend.agent.coding_agents.proc_exec import run_streaming_process
@@ -532,6 +534,23 @@ def claude_env(env: dict[str, str]) -> dict[str, str]:
     return out
 
 
+def _account_run_env(env: dict[str, str], account: int) -> dict[str, str]:
+    """Turn env for this Claude account; account 1 keeps the env exactly as given."""
+    return env if account == PRIMARY else {**env, **account_env(account)}
+
+
+def _switch_text(from_account: int, to_account: int) -> str:
+    return f"{account_label(from_account)} is at its limit — continuing on {account_label(to_account).lower()}…"
+
+
+def _quiet_attempt(state: "_StreamState", blocks: list[dict[str, Any]], streamed: str) -> bool:
+    """Nothing reached the model or a tool: only Claude's own limit message came back."""
+    used = any(state.usage.get(k) for k in (
+        "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd",
+    ))
+    return not (state.saw_model_work or blocks or streamed or used)
+
+
 _COMPACT_TIMEOUT_S = 300.0
 
 
@@ -646,6 +665,8 @@ class _StreamState:
         self.error_text = ""
         self.saw_json = False
         self.saw_work = False
+        # Model output or tool traffic; not Claude's own "<synthetic>" error message.
+        self.saw_model_work = False
         self.model = ""
         self.usage: dict[str, Any] = {}
         # Last assistant-step context window (input+cache). result.usage is
@@ -869,6 +890,11 @@ class _StreamState:
         kind = str(data.get("type") or "")
         if kind != "result" and not (kind == "system" and data.get("subtype") == "init"):
             self.saw_work = True
+        message = data.get("message")
+        if kind in ("stream_event", "user") or (
+            kind == "assistant" and not (isinstance(message, dict) and message.get("model") == "<synthetic>")
+        ):
+            self.saw_model_work = True
         if kind == "system":
             subtype = str(data.get("subtype") or "")
             if subtype == "init":
@@ -1302,14 +1328,26 @@ class ClaudeCodeAdapter:
                 "text": "Resumed Claude Code session…" if session_id else "Starting Claude Code…",
                 "conv_id": conv_id, "run_id": run_id,
             })
+            # Account 2 runs this turn while account 1 is at its plan limit.
+            account = failover.pick_account(cli_path)
+            previous_account = failover.begin_turn(account, session_id)
+            run_env = _account_run_env(env, account)
+            if account == SECONDARY:
+                push({"type": "status", "text": _switch_text(PRIMARY, SECONDARY), "conv_id": conv_id, "run_id": run_id})
+            elif previous_account == SECONDARY:
+                push({"type": "status", "text": "Account 1 is available again — back on account 1.",
+                      "conv_id": conv_id, "run_id": run_id})
+            switched_account = False
             # Core asks for this when the session is big and its prompt cache has expired.
             if session_id and env.get("DUCKY_COMPACT_FIRST") == "1" and not cancelled():
-                compacted = _compact_cold_session(argv, cwd=cwd, env=env, conv_id=conv_id, run_id=run_id,
+                compacted = _compact_cold_session(argv, cwd=cwd, env=run_env, conv_id=conv_id, run_id=run_id,
                                                   push=push, cancel=cancel)
                 if compacted:
                     at = argv.index("--resume") + 1
                     argv = [*argv[:at], compacted, *argv[at + 1:]]
                     session_id = compacted
+            # The transcript before this turn, for a replay on the other account.
+            session_before = failover.session_snapshot(session_id, account) if failover.in_play() else {}
             stdin_payload = full_prompt
             updated = False
             previous_result = None
@@ -1329,7 +1367,7 @@ class ClaudeCodeAdapter:
                     if not _CORE_FEEDS_STDIN_LATE:
                         state.pending_stdin, stdin_data = stdin_data or "", None
                 proc = run_streaming_process(
-                    argv=argv, cwd=cwd, env_extra=claude_env(env), conv_id=conv_id,
+                    argv=argv, cwd=cwd, env_extra=claude_env(run_env), conv_id=conv_id,
                     on_line=state.on_line, timeout_s=timeout_s, cancel=cancel,
                     stdin_data=stdin_data, **stdin_kw,
                 )
@@ -1371,6 +1409,28 @@ class ClaudeCodeAdapter:
                     return with_mode(result)
                 result = with_mode(result)
                 previous_result = result
+                quiet = _quiet_attempt(state, blocks, streamed)
+                texts = (state.error_text, state.final_text, state.trailing_text(), result.error, proc.stderr_tail)
+                if (not terminal and not cancelled() and (not result.ok or quiet)
+                        and failover.is_usage_limit_error(*texts) and failover.in_play()):
+                    failover.note_limit_hit(account, failover.limit_reset_epoch(*texts))
+                    other = failover.other_account(account)
+                    can_switch = not switched_account and failover.can_switch_to(other, cli_path)
+                    if can_switch and quiet:
+                        # Nothing ran yet: replay the same turn on the other account.
+                        if session_id:
+                            failover.carry_session(session_id, account, other, upto=session_before)
+                        failover.set_active(other)
+                        push({"type": "status", "text": _switch_text(account, other),
+                              "conv_id": conv_id, "run_id": run_id})
+                        account, run_env, switched_account = other, _account_run_env(env, other), True
+                        continue
+                    if can_switch and not result.ok:
+                        result.error = (
+                            f"{result.error or 'Claude Code turn failed'}\n\n{account_label(account)} is at its "
+                            f"limit. Your next message will use {account_label(other).lower()}."
+                        )
+                        return result
                 if terminal or partial_failure or cancelled() or result.ok:
                     return result
                 # Streamed work, tokens or opaque stdout make replay uncertain.

@@ -8,10 +8,20 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from .accounts import PRIMARY, SECONDARY, account_credentials_paths, account_label, normalize_account
+except ImportError:
+    from accounts import PRIMARY, SECONDARY, account_credentials_paths, account_label, normalize_account
+
+# Account 1's last bars and 429 block; account 2 keeps its own in _ACCOUNT2_*.
 _LAST_WINDOWS: list[dict[str, Any]] = []
 # Anthropic's plan-usage endpoint answers 429 with Retry-After (often 30+ min). Calling it
 # again before then only extends the block, so wait it out and show the last bars.
 _BLOCKED_UNTIL = 0.0
+_ACCOUNT2_LAST: list[dict[str, Any]] = []
+_ACCOUNT2_BLOCKED_UNTIL = 0.0
+# When each account's plan windows were last read from Anthropic (time.time()).
+_FETCHED_AT: dict[int, float] = {}
 _PAIRS = (
     (
         "anthropic-ratelimit-requests-remaining",
@@ -82,7 +92,28 @@ def reset_at_text(ts: Any) -> str:
     return f"Resets {dt.strftime('%a')} {hour}:{dt.strftime('%M %p')}"
 
 
-def _pct_row(wid: str, label: str, used_pct: float, *, reset: str = "") -> dict[str, Any]:
+def reset_epoch(value: Any) -> float | None:
+    """A window's reset as epoch seconds, from epoch s/ms or an ISO time; None if unreadable."""
+    n = _num(value)
+    if n is not None:
+        if n <= 0:
+            return None
+        return n / 1000.0 if n > 10_000_000_000 else n
+    text = str(value or "").strip()
+    if not text:
+        return None
+    import datetime as _dt
+
+    try:
+        dt = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt.timestamp()
+
+
+def _pct_row(wid: str, label: str, used_pct: float, *, reset: str = "", resets_at: float | None = None) -> dict[str, Any]:
     used = max(0.0, min(100.0, used_pct))
     row: dict[str, Any] = {
         "id": wid,
@@ -93,6 +124,8 @@ def _pct_row(wid: str, label: str, used_pct: float, *, reset: str = "") -> dict[
     }
     if reset:
         row["reset"] = reset
+    if resets_at:
+        row["resets_at"] = resets_at
     return row
 
 
@@ -113,7 +146,7 @@ def windows_from_unified(headers: Any) -> list[dict[str, Any]]:
             continue
         pct = util * 100.0 if util <= 1.5 else util
         reset = reset_at_text(raw.get(f"{prefix}-reset"))
-        out.append(_pct_row(wid, label, pct, reset=reset))
+        out.append(_pct_row(wid, label, pct, reset=reset, resets_at=reset_epoch(raw.get(f"{prefix}-reset"))))
     return out
 
 
@@ -186,7 +219,10 @@ def windows_from_oauth_usage(data: Any) -> list[dict[str, Any]]:
                 raw = str(blob.get("resets_at") or blob.get("reset_at") or "").strip()
                 if raw and not raw.isdigit():
                     reset = reset_at_iso_text(raw)
-            out.append(_pct_row(wid, label, pct, reset=reset))
+            when = reset_epoch(
+                blob.get("resets_at") or blob.get("reset") or blob.get("resetsAt") or blob.get("reset_at")
+            )
+            out.append(_pct_row(wid, label, pct, reset=reset, resets_at=when))
             seen.add(wid)
     return out
 
@@ -237,11 +273,8 @@ def _claude_cred_paths() -> list[Path]:
     return out
 
 
-def _load_claude_oauth() -> tuple[Path | None, dict[str, Any], dict[str, Any]]:
-    env_tok = (os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
-    if env_tok:
-        return None, {}, {"accessToken": env_tok}
-    for path in _claude_cred_paths():
+def _read_oauth(paths: list[Path]) -> tuple[Path | None, dict[str, Any], dict[str, Any]]:
+    for path in paths:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -254,6 +287,20 @@ def _load_claude_oauth() -> tuple[Path | None, dict[str, Any], dict[str, Any]]:
         if token:
             return path, data, blob
     return None, {}, {}
+
+
+def _load_claude_oauth() -> tuple[Path | None, dict[str, Any], dict[str, Any]]:
+    env_tok = (os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
+    if env_tok:
+        return None, {}, {"accessToken": env_tok}
+    return _read_oauth(_claude_cred_paths())
+
+
+def _load_account_oauth(account: int) -> tuple[Path | None, dict[str, Any], dict[str, Any]]:
+    """Account 1: Claude Code's usual login. Account 2: only its own credentials file."""
+    if account == SECONDARY:
+        return _read_oauth(account_credentials_paths(SECONDARY))
+    return _load_claude_oauth()
 
 
 def _oauth_expired(oauth: dict[str, Any]) -> bool:
@@ -306,16 +353,27 @@ def _refresh_claude_oauth(oauth: dict[str, Any]) -> dict[str, Any] | None:
     return out
 
 
-def _keep(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    global _LAST_WINDOWS
-    _LAST_WINDOWS = list(rows)
-    return {"windows": _LAST_WINDOWS}
+def _last(account: int = PRIMARY) -> list[dict[str, Any]]:
+    return _ACCOUNT2_LAST if account == SECONDARY else _LAST_WINDOWS
 
 
-def _last_or_blocked() -> dict[str, Any]:
-    if _LAST_WINDOWS:
-        return {"windows": list(_LAST_WINDOWS)}
-    wait = max(60, int(_BLOCKED_UNTIL - time.time()))
+def _blocked_until(account: int = PRIMARY) -> float:
+    return _ACCOUNT2_BLOCKED_UNTIL if account == SECONDARY else _BLOCKED_UNTIL
+
+
+def _keep(rows: list[dict[str, Any]], account: int = PRIMARY) -> dict[str, Any]:
+    global _LAST_WINDOWS, _ACCOUNT2_LAST
+    if account == SECONDARY:
+        _ACCOUNT2_LAST = list(rows)
+    else:
+        _LAST_WINDOWS = list(rows)
+    return {"windows": _last(account)}
+
+
+def _last_or_blocked(account: int = PRIMARY) -> dict[str, Any]:
+    if _last(account):
+        return {"windows": list(_last(account))}
+    wait = max(60, int(_blocked_until(account) - time.time()))
     return {
         "windows": [],
         "notice": {
@@ -326,16 +384,35 @@ def _last_or_blocked() -> dict[str, Any]:
     }
 
 
-def _block_from(r: Any) -> None:
-    global _BLOCKED_UNTIL
+def _block_from(r: Any, account: int = PRIMARY) -> None:
+    global _BLOCKED_UNTIL, _ACCOUNT2_BLOCKED_UNTIL
     headers = getattr(r, "headers", None) or {}
     wait = _num(headers.get("retry-after"))
-    _BLOCKED_UNTIL = time.time() + (wait if wait is not None and wait > 0 else 300.0)
+    until = time.time() + (wait if wait is not None and wait > 0 else 300.0)
+    if account == SECONDARY:
+        _ACCOUNT2_BLOCKED_UNTIL = until
+    else:
+        _BLOCKED_UNTIL = until
 
 
-def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
-    path, data, oauth = _load_claude_oauth()
-    key = (api_key or "").strip()
+def _get_oauth_usage(token: str, timeout: float) -> Any:
+    import httpx
+
+    return httpx.get(
+        "https://api.anthropic.com/api/oauth/usage",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "anthropic-version": "2023-06-01",
+        },
+        timeout=timeout,
+        follow_redirects=True,
+    )
+
+
+def _plan_usage(account: int, *, keep_expired: bool = False, timeout: float = 8.0) -> tuple[str, list[dict[str, Any]]]:
+    """This account's plan windows: ("ok", rows), or "none" / "expired" / "blocked" / "failed"."""
+    path, data, oauth = _load_account_oauth(account)
     if oauth and _oauth_expired(oauth):
         try:
             refreshed = _refresh_claude_oauth(oauth)
@@ -348,65 +425,100 @@ def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
                     _save_claude_oauth(path, data, oauth)
                 except Exception:
                     pass
-        elif not key:
-            return _notice("Claude login expired. Log in to see 5-hour and weekly limits.")
+        elif not keep_expired:
+            return "expired", []
     token = str(oauth.get("accessToken") or oauth.get("access_token") or "").strip()
-    if token and time.time() < _BLOCKED_UNTIL:
-        return _last_or_blocked()
-    if token:
-        try:
-            import httpx
-
-            r = httpx.get(
-                "https://api.anthropic.com/api/oauth/usage",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "anthropic-beta": "oauth-2025-04-20",
-                    "anthropic-version": "2023-06-01",
-                },
-                timeout=8.0,
-                follow_redirects=True,
-            )
-            if r.status_code == 401:
+    if not token:
+        return "none", []
+    if time.time() < _blocked_until(account):
+        return "blocked", []
+    try:
+        r = _get_oauth_usage(token, timeout)
+        if r.status_code == 401:
+            try:
+                refreshed = _refresh_claude_oauth(oauth)
+            except Exception:
+                refreshed = None
+            if refreshed and path is not None:
                 try:
-                    refreshed = _refresh_claude_oauth(oauth)
+                    _save_claude_oauth(path, data, refreshed)
                 except Exception:
-                    refreshed = None
-                if refreshed and path is not None:
-                    try:
-                        _save_claude_oauth(path, data, refreshed)
-                    except Exception:
-                        pass
-                    token = str(refreshed.get("accessToken") or "").strip()
-                    r = httpx.get(
-                        "https://api.anthropic.com/api/oauth/usage",
-                        headers={
-                            "Authorization": f"Bearer {token}",
-                            "anthropic-beta": "oauth-2025-04-20",
-                            "anthropic-version": "2023-06-01",
-                        },
-                        timeout=8.0,
-                        follow_redirects=True,
-                    )
-                if r.status_code == 401:
-                    return _notice("Claude login expired. Log in to see 5-hour and weekly limits.")
-            if r.status_code == 429:
-                _block_from(r)
-                return _last_or_blocked()
-            if r.status_code < 400:
-                rows = windows_from_oauth_usage(r.json())
-                if rows:
-                    return _keep(rows)
-        except Exception:
-            pass
+                    pass
+                token = str(refreshed.get("accessToken") or "").strip()
+                r = _get_oauth_usage(token, timeout)
+            if r.status_code == 401:
+                return "expired", []
+        if r.status_code == 429:
+            _block_from(r, account)
+            return "blocked", []
+        if r.status_code < 400:
+            rows = windows_from_oauth_usage(r.json())
+            if rows:
+                _keep(rows, account)
+                _FETCHED_AT[account] = time.time()
+                return "ok", rows
+    except Exception:
+        pass
+    return "failed", []
+
+
+def account_windows(account: int, *, max_age: float = 60.0) -> list[dict[str, Any]] | None:
+    """This account's 5-hour / weekly rows, reused for ``max_age`` s; None when unknown.
+
+    Unknown = not logged in, login expired, network error, or blocked with nothing cached.
+    """
+    account = normalize_account(account)
+    if max_age > 0 and time.time() - _FETCHED_AT.get(account, 0.0) < max_age:
+        return list(_last(account))
+    status, rows = _plan_usage(account, timeout=4.0)
+    if status == "ok":
+        return list(rows)
+    if status == "blocked":
+        return list(_last(account)) or None
+    return None
+
+
+def _meter_account() -> int:
+    try:
+        try:
+            from .failover import current_account
+        except ImportError:
+            from failover import current_account
+        return current_account()
+    except Exception:
+        return PRIMARY
+
+
+def _for_account(out: dict[str, Any], account: int) -> dict[str, Any]:
+    """Account 2's bars and notices say which account they are about."""
+    if account != SECONDARY:
+        return out
+    prefix = account_label(account)
+    out = dict(out)
+    out["windows"] = [{**row, "label": f"{prefix} · {row.get('label') or ''}"} for row in out.get("windows") or []]
+    if isinstance(out.get("notice"), dict):
+        out["notice"] = {**out["notice"], "message": f"{prefix}: {out['notice'].get('message') or ''}"}
+    return out
+
+
+def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
+    account = _meter_account()
+    key = (api_key or "").strip() if account == PRIMARY else ""
+    status, rows = _plan_usage(account, keep_expired=bool(key))
+    if status == "ok":
+        return _for_account({"windows": list(rows)}, account)
+    if status == "blocked":
+        return _for_account(_last_or_blocked(account), account)
+    if status == "expired":
+        return _for_account(_notice("Claude login expired. Log in to see 5-hour and weekly limits."), account)
     if not key:
-        if token:
-            return _notice(
+        if status == "failed":
+            return _for_account(_notice(
                 "Couldn't read Claude plan limits. Log in again, or press Refresh.",
                 action="retry",
                 label="Refresh",
-            )
-        return _notice("Log in with Claude Code to see 5-hour and weekly limits.")
+            ), account)
+        return _for_account(_notice("Log in with Claude Code to see 5-hour and weekly limits."), account)
     try:
         import httpx
 

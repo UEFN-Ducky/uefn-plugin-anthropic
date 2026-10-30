@@ -20,6 +20,8 @@ while True:
         break
 os.environ["UEFN_DUCKY_PANEL_PORT"] = str(_panel_test_port + 1)  # panel server = port - 1
 os.environ["UEFN_DUCKY_PORT"] = str(_panel_test_port)  # bridge's listener default
+# This PC's real second Claude account stays out of the tests (failover tests opt back in).
+os.environ["DUCKY_CLAUDE_FAILOVER"] = "off"
 
 
 def _refuse_live_address(address):

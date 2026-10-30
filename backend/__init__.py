@@ -338,4 +338,8 @@ def register(api) -> None:
     from . import graph_nodes
 
     graph_nodes.register_nodes(api)
+    from .account_rpc import register_account_rpcs
+
+    # Settings → "Second Claude account": log in / status / log out of account 2.
+    register_account_rpcs(api)
     api.log("Anthropic gateway contribution active (Providers + Claude Code + IDE)")

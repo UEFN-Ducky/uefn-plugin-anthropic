@@ -1,7 +1,7 @@
 {
   "id": "anthropic",
   "kind": "plugin",
-  "version": "1.0.62",
+  "version": "1.0.63",
   "label": "Anthropic",
   "description": "Anthropic API key + Claude Code coding agent for Settings \u2192 LLMs. Install from Store \u2192 Gateways, then enable to show Anthropic under Providers & Keys and Claude Code under Coding Agents.",
   "min_app_version": "1.2.380",
@@ -67,6 +67,32 @@
               { "value": "300000", "label": "300K tokens" },
               { "value": "500000", "label": "500K tokens" }
             ]
+          }
+        ]
+      },
+      {
+        "tab": "LLMs",
+        "id": "claude-accounts",
+        "title": "Second Claude account",
+        "description": "Log in a second Claude subscription. When account 1 reaches its 5-hour or weekly limit, Claude Code chats carry on with account 2.",
+        "order": 85,
+        "properties": [
+          {
+            "id": "account2Login",
+            "type": "action",
+            "label": "Log in account 2",
+            "description": "Opens a Claude Login (account 2) tab and the sign-in page. In the browser, sign in with your OTHER Claude account (log out of account 1 on claude.ai first if needed). If the page shows a code, paste it in that tab.",
+            "rpc": "account2_login",
+            "status_rpc": "account2_status",
+            "connected_label": "Log out account 2",
+            "connected_rpc": "account2_logout"
+          },
+          {
+            "id": "accountFailover",
+            "type": "boolean",
+            "default": true,
+            "label": "Switch to account 2 when account 1 is at its limit",
+            "description": "When account 1's 5-hour or weekly limit is at 100%, new Claude Code turns run on account 2, then go back to account 1 once its limit resets."
           }
         ]
       }

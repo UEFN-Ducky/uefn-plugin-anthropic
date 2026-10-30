@@ -23,6 +23,7 @@ _DONE_WORDS = frozenset({"done", "logged in", "ok", "ready", "continue", "yes", 
 _PENDING_PATH = default_app_data_dir() / "coding_agents" / "auth_pending.json"
 SETTINGS_LOGIN_HREF = "ducky://settings.llms/anthropic#login"
 SETTINGS_CONV = "__settings__"
+ACCOUNT2_LOGIN_CONV = "__settings_account2__"
 _URL_WAIT_S = 12.0
 _LINK_GIVE_UP_S = 30.0
 _NO_LINK = "Claude never printed a sign-in link. Check the Claude Login tab, then press Log in again."
@@ -70,15 +71,20 @@ def resolve_claude_bin(override: str = "") -> str:
     return _default_claude_bin()
 
 
-def claude_auth_status(cli_path: str = "") -> dict[str, Any]:
-    """Return {loggedIn, ...} from `claude auth status --json`."""
+def claude_auth_status(cli_path: str = "", *, account: int = 1) -> dict[str, Any]:
+    """Return {loggedIn, ...} from `claude auth status --json` for account 1 or 2."""
     binary = resolve_claude_bin(cli_path)
     if not binary:
         return {"loggedIn": False, "error": "claude CLI not found"}
     try:
         from frontend.ui_web.terminal.path_env import env_with_fresh_path
 
-        env = env_with_fresh_path()
+        try:
+            from .accounts import account_env
+        except ImportError:
+            from accounts import account_env
+
+        env = {**env_with_fresh_path(), **account_env(account)}
         kwargs: dict[str, Any] = {
             "capture_output": True,
             "text": True,
@@ -101,8 +107,8 @@ def claude_auth_status(cli_path: str = "") -> dict[str, Any]:
     return {"loggedIn": False}
 
 
-def is_claude_logged_in(cli_path: str = "") -> bool:
-    return bool(claude_auth_status(cli_path).get("loggedIn"))
+def is_claude_logged_in(cli_path: str = "", *, account: int = 1) -> bool:
+    return bool(claude_auth_status(cli_path, account=account).get("loggedIn"))
 
 
 def claude_definitely_logged_out(cli_path: str = "", *, retry_after_s: float = 1.0) -> bool:
@@ -125,7 +131,7 @@ def _logout_argv(binary: str) -> list[str]:
     return [binary, "auth", "logout"]
 
 
-def claude_logout(cli_path: str = "") -> dict[str, Any]:
+def claude_logout(cli_path: str = "", *, account: int = 1) -> dict[str, Any]:
     """Sign out of the Claude Code CLI so Settings can re-run the login flow."""
     binary = resolve_claude_bin(cli_path)
     if not binary:
@@ -133,7 +139,12 @@ def claude_logout(cli_path: str = "") -> dict[str, Any]:
     try:
         from frontend.ui_web.terminal.path_env import env_with_fresh_path
 
-        env = env_with_fresh_path()
+        try:
+            from .accounts import account_env
+        except ImportError:
+            from accounts import account_env
+
+        env = {**env_with_fresh_path(), **account_env(account)}
         kwargs: dict[str, Any] = {
             "capture_output": True,
             "text": True,
@@ -146,15 +157,20 @@ def claude_logout(cli_path: str = "") -> dict[str, Any]:
         proc = subprocess.run(_logout_argv(binary), **kwargs)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
-    try:
-        if _PENDING_PATH.is_file():
-            _PENDING_PATH.unlink()
-    except OSError:
-        pass
-    if is_claude_logged_in(cli_path):
+    if account == 2:
+        # Account 1's pending login (and its chats' deferred prompts) stay untouched.
+        clear_pending_auth(ACCOUNT2_LOGIN_CONV)
+    else:
+        try:
+            if _PENDING_PATH.is_file():
+                _PENDING_PATH.unlink()
+        except OSError:
+            pass
+    if is_claude_logged_in(cli_path, account=account):
         err = ((proc.stderr or proc.stdout or "logout did not take effect").strip())[:300]
         return {"ok": False, "logged_in": True, "error": err}
-    return {"ok": True, "logged_in": False, "message": "Logged out of Claude Code."}
+    message = "Logged out of account 2." if account == 2 else "Logged out of Claude Code."
+    return {"ok": True, "logged_in": False, "message": message}
 
 
 def extract_auth_url(text: str) -> str:
@@ -340,16 +356,29 @@ def _kill_login_session(session_id: str) -> None:
         pass
 
 
-def spawn_login_session(mgr: Any, workdir: str, conv_id: str, binary: str = "") -> dict[str, Any]:
-    """Listed Claude Login session. Do not focus the editor tab (that kills the popup)."""
+def spawn_login_session(
+    mgr: Any,
+    workdir: str,
+    conv_id: str,
+    binary: str = "",
+    *,
+    title: str = "Claude Login",
+    env_extra: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Listed Claude Login session. Do not focus the editor tab (that kills the popup).
+
+    ``env_extra`` replaces the no-browser override (account 2 passes its config folder,
+    and lets Claude open the browser itself); the shell fallback keeps it too.
+    """
     common: dict[str, Any] = {
         "cwd": workdir,
-        "title": "Claude Login",
+        "title": title,
         "push_open": True,
         "hidden": False,
         "conv_id": conv_id,
     }
-    extra = _login_env_extra()
+    extra = _login_env_extra() if env_extra is None else env_extra
+    shell_only: dict[str, Any] = {**common, "env_extra": env_extra} if env_extra else common
     # Windows machines often have no Git Bash — never leave spawn on the bash default.
     login_shell = "powershell" if os.name == "nt" else "bash"
     if binary:
@@ -376,9 +405,9 @@ def spawn_login_session(mgr: Any, workdir: str, conv_id: str, binary: str = "") 
             except TypeError:
                 pass
     try:
-        spawn = mgr.spawn(shell=login_shell, **common, activate=False)
+        spawn = mgr.spawn(shell=login_shell, **shell_only, activate=False)
     except TypeError:
-        spawn = mgr.spawn(shell=login_shell, **common)
+        spawn = mgr.spawn(shell=login_shell, **shell_only)
     session_id = str(spawn.get("session_id") or spawn.get("id") or "").strip()
     session = mgr.get_session(session_id) if spawn.get("ok") and session_id else None
     if session is not None and binary:
