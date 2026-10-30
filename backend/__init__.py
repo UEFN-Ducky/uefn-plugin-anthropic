@@ -359,7 +359,7 @@ def _cache_ttl_s() -> int:
 
 
 def register(api) -> None:
-    from .anthropic_provider import AnthropicProvider
+    from .anthropic_provider import AnthropicProvider, is_quota_error
     from .claude_code_adapter import ClaudeCodeAdapter
 
     from .model_fetch import clear_model_cache
@@ -376,6 +376,7 @@ def register(api) -> None:
         cache_ttl_s=_cache_ttl_s,
         cost_mode="inclusive_input",
         shows_thinking_effort=True,
+        is_quota_error=is_quota_error,
     )
     api.register_coding_agent(
         "claude_code",
