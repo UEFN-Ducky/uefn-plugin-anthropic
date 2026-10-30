@@ -1063,7 +1063,10 @@ class _StreamState:
         if isinstance(text, str) and text.strip():
             self.final_text = text.strip()
         if self.is_error and not self.error_text:
-            self.error_text = self.final_text or subtype or "Claude Code turn failed"
+            # The CLI puts the real reason (e.g. "No conversation found with session ID") in errors.
+            errors = data.get("errors")
+            detail = "; ".join(str(e) for e in errors if e) if isinstance(errors, list) else ""
+            self.error_text = self.final_text or detail or subtype or "Claude Code turn failed"
         usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
         inp = int(usage.get("input_tokens") or 0)
         cache_read = int(usage.get("cache_read_input_tokens") or 0)
@@ -1400,6 +1403,15 @@ class ClaudeCodeAdapter:
                 result = with_mode(result)
                 previous_result = result
                 quiet = _quiet_attempt(state, blocks, streamed)
+                if (session_id and quiet and not terminal and not result.ok and "--resume" in argv
+                        and "no conversation found" in (state.error_text or "").lower()):
+                    # The saved session is gone: run this turn in a fresh one instead of failing every turn.
+                    at = argv.index("--resume")
+                    argv = argv[:at] + argv[at + 2:]
+                    session_id, session_before = "", {}
+                    push({"type": "status", "conv_id": conv_id, "run_id": run_id,
+                          "text": "This chat's Claude Code session was missing, so it started a fresh one."})
+                    continue
                 texts = (state.error_text, result.error, proc.stderr_tail)
                 if quiet:
                     # Only Claude's own message came back; once the model ran, its prose may quote a limit.

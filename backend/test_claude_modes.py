@@ -135,6 +135,23 @@ def test_a_failed_compaction_leaves_the_turn_unchanged(launch, monkeypatch):
     assert second[second.index("--resume") + 1] == "prior-session"
 
 
+def test_a_missing_session_reruns_the_turn_fresh_instead_of_failing(launch, monkeypatch):
+    def process(**kw):
+        launch.calls.append(kw)
+        if "--resume" in kw["argv"]:
+            kw["on_line"](json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                                     "session_id": "dead", "usage": {"output_tokens": 0},
+                                     "errors": ["No conversation found with session ID: dead"]}))
+            return ProcResult(returncode=1)
+        emit_success(kw)
+        return ProcResult(returncode=0)
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    result = launch.run("dead")
+    assert result.ok and result.reply_text == "answer" and result.upstream_session_id == "saved-session"
+    assert len(launch.calls) == 2 and "--resume" not in launch.calls[1]["argv"]
+    assert "user payload" in launch.calls[1]["stdin_data"]
+
+
 def test_same_session_mode_switches_apply_current_mode(launch):
     for mode in ("agent", "ask", "plan", "agent", "plan", "ask"):
         before = len(launch.calls)
