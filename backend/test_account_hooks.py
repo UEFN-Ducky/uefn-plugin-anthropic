@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import importlib.util
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -13,12 +12,11 @@ if _pkg is not None and Path(getattr(_pkg, "__file__", "") or ".").resolve().par
     for _k in [k for k in sys.modules if k == "backend" or k.startswith("backend.")]:
         del sys.modules[_k]
 
-_HERE = Path(__file__).resolve().parent
-_NAME = "_claude_account_hooks_test"
-_spec = importlib.util.spec_from_file_location(_NAME, _HERE / "__init__.py", submodule_search_locations=[str(_HERE)])
-plugin = importlib.util.module_from_spec(_spec)
-sys.modules[_NAME] = plugin
-_spec.loader.exec_module(plugin)
+from backend.uefn_plugins import host  # noqa: E402
+
+# Loaded the way Ducky loads the plugin, so its relative imports work.
+plugin = host._import_backend("claude_account_hooks_test", Path(__file__).resolve().parents[1], "backend")
+_NAME = plugin.__name__
 accounts = importlib.import_module(_NAME + ".accounts")
 failover = importlib.import_module(_NAME + ".failover")
 cli_update = importlib.import_module(_NAME + ".cli_update")
