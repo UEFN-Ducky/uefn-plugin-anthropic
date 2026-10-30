@@ -122,6 +122,36 @@ def failover_enabled() -> bool:
     return plugin_pref("accountFailover", True) is not False
 
 
+CORE_AGENT = "claude_code"
+
+
+def migrate_account2() -> str | None:
+    """Move a logged-in PR #3 account 2 folder into a core account named "Account 2", once.
+
+    The folder is moved (not copied), so a second call finds nothing to do. Returns the
+    new account id, or None when there was nothing to move or the move failed.
+    """
+    old = secondary_config_dir()
+    if not any((old / name).is_file() for name in (".credentials.json", "credentials.json")):
+        return None
+    from backend.agent import accounts as core
+
+    new_id = core.add_account(CORE_AGENT, "Account 2", "login")
+    try:
+        target = core.account_config_dir(CORE_AGENT, new_id)
+        target.rmdir()  # Created empty above; the old folder takes its place.
+        os.replace(old, target)
+    except OSError:
+        core.remove_account(CORE_AGENT, new_id)
+        return None
+    try:
+        if preferred_account() == SECONDARY:
+            core.set_active_account(CORE_AGENT, new_id)
+    except Exception:
+        pass
+    return new_id
+
+
 PREFERRED_PREF = "claudeAccount"
 
 

@@ -71,20 +71,26 @@ def resolve_claude_bin(override: str = "") -> str:
     return _default_claude_bin()
 
 
-def claude_auth_status(cli_path: str = "", *, account: int = 1) -> dict[str, Any]:
-    """Return {loggedIn, ...} from `claude auth status --json` for account 1 or 2."""
+def _run_as(account: int, config_dir: Any) -> dict[str, str]:
+    """Env that runs ``claude`` as a core account's folder, else as account 1 or 2."""
+    if config_dir:
+        return {"CLAUDE_CONFIG_DIR": str(config_dir)}
+    try:
+        from .accounts import account_env
+    except ImportError:
+        from accounts import account_env
+    return account_env(account)
+
+
+def claude_auth_status(cli_path: str = "", *, account: int = 1, config_dir: Any = None) -> dict[str, Any]:
+    """Return {loggedIn, ...} from `claude auth status --json` for account 1 or 2, or ``config_dir``."""
     binary = resolve_claude_bin(cli_path)
     if not binary:
         return {"loggedIn": False, "error": "claude CLI not found"}
     try:
         from frontend.ui_web.terminal.path_env import env_with_fresh_path
 
-        try:
-            from .accounts import account_env
-        except ImportError:
-            from accounts import account_env
-
-        env = {**env_with_fresh_path(), **account_env(account)}
+        env = {**env_with_fresh_path(), **_run_as(account, config_dir)}
         kwargs: dict[str, Any] = {
             "capture_output": True,
             "text": True,
@@ -131,7 +137,7 @@ def _logout_argv(binary: str) -> list[str]:
     return [binary, "auth", "logout"]
 
 
-def claude_logout(cli_path: str = "", *, account: int = 1) -> dict[str, Any]:
+def claude_logout(cli_path: str = "", *, account: int = 1, config_dir: Any = None) -> dict[str, Any]:
     """Sign out of the Claude Code CLI so Settings can re-run the login flow."""
     binary = resolve_claude_bin(cli_path)
     if not binary:
@@ -139,12 +145,7 @@ def claude_logout(cli_path: str = "", *, account: int = 1) -> dict[str, Any]:
     try:
         from frontend.ui_web.terminal.path_env import env_with_fresh_path
 
-        try:
-            from .accounts import account_env
-        except ImportError:
-            from accounts import account_env
-
-        env = {**env_with_fresh_path(), **account_env(account)}
+        env = {**env_with_fresh_path(), **_run_as(account, config_dir)}
         kwargs: dict[str, Any] = {
             "capture_output": True,
             "text": True,
@@ -157,7 +158,9 @@ def claude_logout(cli_path: str = "", *, account: int = 1) -> dict[str, Any]:
         proc = subprocess.run(_logout_argv(binary), **kwargs)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
-    if account == 2:
+    if config_dir:
+        pass  # A core account's own folder: account 1's pending login stays untouched.
+    elif account == 2:
         # Account 1's pending login (and its chats' deferred prompts) stay untouched.
         clear_pending_auth(ACCOUNT2_LOGIN_CONV)
     else:
@@ -166,10 +169,15 @@ def claude_logout(cli_path: str = "", *, account: int = 1) -> dict[str, Any]:
                 _PENDING_PATH.unlink()
         except OSError:
             pass
-    if is_claude_logged_in(cli_path, account=account):
+    still_in = (
+        claude_auth_status(cli_path, config_dir=config_dir).get("loggedIn")
+        if config_dir
+        else is_claude_logged_in(cli_path, account=account)
+    )
+    if still_in:
         err = ((proc.stderr or proc.stdout or "logout did not take effect").strip())[:300]
         return {"ok": False, "logged_in": True, "error": err}
-    message = "Logged out of account 2." if account == 2 else "Logged out of Claude Code."
+    message = "Logged out of account 2." if account == 2 and not config_dir else "Logged out of Claude Code."
     return {"ok": True, "logged_in": False, "message": message}
 
 

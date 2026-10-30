@@ -20,8 +20,11 @@ _LAST_WINDOWS: list[dict[str, Any]] = []
 _BLOCKED_UNTIL = 0.0
 _ACCOUNT2_LAST: list[dict[str, Any]] = []
 _ACCOUNT2_BLOCKED_UNTIL = 0.0
+# Core accounts are keyed by their config folder (a str) instead of 1 / 2.
+_DIR_LAST: dict[str, list[dict[str, Any]]] = {}
+_DIR_BLOCKED_UNTIL: dict[str, float] = {}
 # When each account's plan windows were last read from Anthropic (time.time()).
-_FETCHED_AT: dict[int, float] = {}
+_FETCHED_AT: dict[Any, float] = {}
 _PAIRS = (
     (
         "anthropic-ratelimit-requests-remaining",
@@ -297,7 +300,9 @@ def _load_claude_oauth() -> tuple[Path | None, dict[str, Any], dict[str, Any]]:
 
 
 def _load_account_oauth(account: int) -> tuple[Path | None, dict[str, Any], dict[str, Any]]:
-    """Account 1: Claude Code's usual login. Account 2: only its own credentials file."""
+    """Account 1: Claude Code's usual login. Account 2 / a config folder: only its own credentials file."""
+    if isinstance(account, str):
+        return _read_oauth([Path(account) / ".credentials.json", Path(account) / "credentials.json"])
     if account == SECONDARY:
         return _read_oauth(account_credentials_paths(SECONDARY))
     return _load_claude_oauth()
@@ -354,16 +359,22 @@ def _refresh_claude_oauth(oauth: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _last(account: int = PRIMARY) -> list[dict[str, Any]]:
+    if isinstance(account, str):
+        return _DIR_LAST.get(account, [])
     return _ACCOUNT2_LAST if account == SECONDARY else _LAST_WINDOWS
 
 
 def _blocked_until(account: int = PRIMARY) -> float:
+    if isinstance(account, str):
+        return _DIR_BLOCKED_UNTIL.get(account, 0.0)
     return _ACCOUNT2_BLOCKED_UNTIL if account == SECONDARY else _BLOCKED_UNTIL
 
 
 def _keep(rows: list[dict[str, Any]], account: int = PRIMARY) -> dict[str, Any]:
     global _LAST_WINDOWS, _ACCOUNT2_LAST
-    if account == SECONDARY:
+    if isinstance(account, str):
+        _DIR_LAST[account] = list(rows)
+    elif account == SECONDARY:
         _ACCOUNT2_LAST = list(rows)
     else:
         _LAST_WINDOWS = list(rows)
@@ -389,7 +400,9 @@ def _block_from(r: Any, account: int = PRIMARY) -> None:
     headers = getattr(r, "headers", None) or {}
     wait = _num(headers.get("retry-after"))
     until = time.time() + (wait if wait is not None and wait > 0 else 300.0)
-    if account == SECONDARY:
+    if isinstance(account, str):
+        _DIR_BLOCKED_UNTIL[account] = until
+    elif account == SECONDARY:
         _ACCOUNT2_BLOCKED_UNTIL = until
     else:
         _BLOCKED_UNTIL = until
@@ -466,8 +479,10 @@ def account_windows(account: int, *, max_age: float = 60.0) -> list[dict[str, An
     """This account's 5-hour / weekly rows, reused for ``max_age`` s; None when unknown.
 
     Unknown = not logged in, login expired, network error, or blocked with nothing cached.
+    ``account`` may be a core account's config folder (str).
     """
-    account = normalize_account(account)
+    if not isinstance(account, str):
+        account = normalize_account(account)
     if max_age > 0 and time.time() - _FETCHED_AT.get(account, 0.0) < max_age:
         return list(_last(account))
     status, rows = _plan_usage(account, timeout=4.0)
