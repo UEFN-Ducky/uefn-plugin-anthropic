@@ -10,6 +10,7 @@ saved sessions, so the two logins never overwrite each other.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 PRIMARY = 1
@@ -55,7 +56,49 @@ def account_env(account: int) -> dict[str, str]:
         return {}
     folder = secondary_config_dir()
     folder.mkdir(parents=True, exist_ok=True)
+    share_config(account_config_dir(PRIMARY), folder)
     return {CONFIG_ENV: str(folder)}
+
+
+# Everything but the login is account 1's: Ducky's skills, the person's hooks, CLAUDE.md
+# and saved sessions (Ducky reads session logs from account 1's folder).
+SHARED_DIRS = ("projects", "skills", "agents", "commands", "plugins", "hooks", "output-styles")
+SHARED_FILES = ("settings.json", "CLAUDE.md")
+
+
+def _link_dir(src: Path, dst: Path) -> None:
+    if os.name == "nt":
+        import _winapi
+
+        _winapi.CreateJunction(str(src), str(dst))  # No admin / Developer Mode needed.
+    else:
+        os.symlink(src, dst, target_is_directory=True)
+
+
+def share_config(primary: Path, secondary: Path) -> None:
+    """Link account 1's shared folders into account 2's and copy its newer shared files.
+
+    A folder account 2 already has for real is left alone (its sessions are carried over
+    per turn instead). Never raises.
+    """
+    if primary.resolve() == secondary.resolve():
+        return
+    for name in SHARED_DIRS:
+        src, dst = primary / name, secondary / name
+        try:
+            if name == "projects":
+                src.mkdir(parents=True, exist_ok=True)
+            if src.is_dir() and not os.path.lexists(dst):
+                _link_dir(src, dst)
+        except OSError:
+            pass
+    for name in SHARED_FILES:
+        src, dst = primary / name, secondary / name
+        try:
+            if src.is_file() and (not dst.is_file() or dst.stat().st_mtime < src.stat().st_mtime):
+                shutil.copy2(src, dst)
+        except OSError:
+            pass
 
 
 def account_credentials_paths(account: int) -> list[Path]:
@@ -75,5 +118,21 @@ def plugin_pref(key: str, default: object) -> object:
 
 
 def failover_enabled() -> bool:
-    """Settings → "Switch to account 2 when account 1 is at its limit" (on by default)."""
+    """Settings → "Switch accounts when one is at its limit" (on by default)."""
     return plugin_pref("accountFailover", True) is not False
+
+
+PREFERRED_PREF = "claudeAccount"
+
+
+def preferred_account() -> int:
+    """The account the person picked for Claude Code turns (Settings or the model picker)."""
+    return normalize_account(plugin_pref(PREFERRED_PREF, PRIMARY))
+
+
+def set_preferred_account(account: object) -> int:
+    from frontend.ui_web.plugin_host_api import prefs_plugin_get, prefs_plugin_set
+
+    n = normalize_account(account)
+    prefs_plugin_set("anthropic", {**prefs_plugin_get("anthropic"), PREFERRED_PREF: str(n)})
+    return n

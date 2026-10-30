@@ -19,6 +19,7 @@ sys.modules[pkg.__name__] = pkg
 a = importlib.import_module(pkg.__name__ + ".claude_code_adapter")
 fo = importlib.import_module(pkg.__name__ + ".failover")
 u = importlib.import_module(pkg.__name__ + ".usage")
+acc = importlib.import_module(pkg.__name__ + ".accounts")
 from backend.agent.coding_agents.proc_exec import ProcResult
 
 FUTURE = 2_000_000_000.0
@@ -32,7 +33,7 @@ def accounts(tmp_path, monkeypatch):
     for d in dirs.values():
         d.mkdir()
     ns = types.SimpleNamespace(dirs=dirs, windows={1: None, 2: None}, enabled=True, logged_in=True,
-                               state=tmp_path / "state.json")
+                               state=tmp_path / "state.json", preferred=1)
     ns.login = lambda n=2: (dirs[n] / ".credentials.json").write_text(
         json.dumps({"claudeAiOauth": {"accessToken": f"tok{n}"}}), encoding="utf-8")
     creds = lambda n: [dirs[int(n)] / ".credentials.json", dirs[int(n)] / "credentials.json"]
@@ -40,6 +41,8 @@ def accounts(tmp_path, monkeypatch):
     monkeypatch.setattr(fo, "account_config_dir", lambda n: dirs[int(n)])
     monkeypatch.setattr(fo, "account_credentials_paths", creds)
     monkeypatch.setattr(fo, "failover_enabled", lambda: ns.enabled)
+    monkeypatch.setattr(fo, "preferred_account", lambda: ns.preferred)
+    monkeypatch.setattr(fo, "account_env", lambda n: {})
     monkeypatch.setattr(fo, "_windows", lambda n, max_age=60.0: ns.windows[n])
     monkeypatch.setattr(fo, "logged_in", lambda n, cli_path="": n == 1 or ns.logged_in)
     monkeypatch.setattr(u, "account_credentials_paths", creds)
@@ -124,6 +127,26 @@ def test_pick_never_raises_and_corrupt_state_is_ignored(accounts, monkeypatch):
     assert fo.pick_account() == 1
     monkeypatch.setattr(fo, "account_full", Mock(side_effect=RuntimeError("boom")))
     assert fo.pick_account() == 1
+
+
+def test_picked_account_2_runs_first_and_falls_back_to_account_1(accounts):
+    accounts.preferred = 2
+    assert fo.pick_account() == 1  # no login for account 2 yet
+    accounts.login()
+    accounts.windows[2] = [_row("hourly", 10)]
+    assert fo.pick_account() == 2 and fo.current_account() == 2
+    accounts.windows[2] = [_row("weekly", 100, FUTURE)]
+    fo._CHECKED.clear()
+    assert fo.pick_account() == 1
+    fo.set_active(1)
+    assert fo.current_account() == 1
+
+
+def test_picked_account_2_without_switching_stays_on_2(accounts):
+    accounts.login()
+    accounts.preferred, accounts.enabled = 2, False
+    accounts.windows[2] = [_row("hourly", 100)]
+    assert fo.in_play() and fo.pick_account() == 2
 
 
 def test_meter_account_follows_saved_state(accounts):
@@ -302,9 +325,45 @@ def test_meter_labels_account_2(accounts, monkeypatch):
     accounts.login(2)
     out = u.fetch_usage("")
     assert out["windows"][0]["label"] == "Account 2 · 5-hour limit"
+    assert out["switch"]["value"] == "1" and out["switch"]["rpc"] == "set_claude_account"
+    assert [o["id"] for o in out["switch"]["options"]] == ["1", "2"]
     monkeypatch.setattr(fo, "current_account", lambda: 1)
     monkeypatch.setattr(u, "_load_claude_oauth", lambda: (None, {}, {"accessToken": "tok1"}))
-    assert u.fetch_usage("")["windows"][0]["label"] == "5-hour limit"
+    assert u.fetch_usage("")["windows"][0]["label"] == "Account 1 · 5-hour limit"
+    (accounts.dirs[2] / ".credentials.json").unlink()
+    out = u.fetch_usage("")
+    assert out["windows"][0]["label"] == "5-hour limit" and "switch" not in out
+
+
+def test_share_config_links_account_1_folders_and_copies_its_files(tmp_path):
+    one, two = tmp_path / "one", tmp_path / "two"
+    (one / "skills" / "verse").mkdir(parents=True)
+    (one / "settings.json").write_text('{"hooks": {}}', encoding="utf-8")
+    (two / "agents").mkdir(parents=True)  # a real folder account 2 already has stays its own
+    (one / "agents").mkdir()
+    acc.share_config(one, two)
+    assert (two / "skills" / "verse").is_dir()
+    assert (one / "projects").is_dir() and (two / "projects").is_dir()
+    (two / "projects" / "C--p").mkdir()
+    assert (one / "projects" / "C--p").is_dir()  # same folder: sessions are shared
+    assert not os.path.samefile(one / "agents", two / "agents")
+    assert (two / "settings.json").read_text(encoding="utf-8") == '{"hooks": {}}'
+    assert not (two / ".credentials.json").exists()
+    acc.share_config(one, two)  # again: nothing breaks
+
+
+def test_replay_on_shared_projects_drops_the_failed_attempt(accounts, tmp_path):
+    shared = tmp_path / "shared" / "C--proj"
+    shared.mkdir(parents=True)
+    acc._link_dir(tmp_path / "shared", accounts.dirs[1] / "projects")
+    acc._link_dir(tmp_path / "shared", accounts.dirs[2] / "projects")
+    (shared / "sid-1.jsonl").write_text("before\n", encoding="utf-8")
+    before = fo.session_snapshot("sid-1", 1)
+    (shared / "sid-1.jsonl").write_text("before\nprompt\nlimit\n", encoding="utf-8")
+    assert fo.carry_session("sid-1", 1, 2, upto=before)
+    assert (shared / "sid-1.jsonl").read_text(encoding="utf-8") == "before\n"
+    assert fo.carry_session("sid-1", 2, 1)
+    assert (shared / "sid-1.jsonl").read_text(encoding="utf-8") == "before\n"
 
 
 # ── adapter ─────────────────────────────────────────────────────────────
@@ -416,6 +475,38 @@ def test_no_retry_after_streamed_work(accounts, launch):
     assert not result.ok and len(launch.calls) == 1
     assert "Your next message will use account 2." in result.error
     assert fo.exhausted_until(1) == FUTURE
+
+
+def test_model_prose_about_limits_is_not_a_limit(accounts, launch):
+    accounts.login()
+    accounts.windows[1] = [_row("hourly", 50)]
+
+    def failed_turn(kw):
+        _init(kw)
+        _line(kw, {"type": "assistant", "message": {"id": "m1", "model": "claude-sonnet", "content": [
+            {"type": "text", "text": "When you've hit your limit, Ducky switches accounts."}],
+            "usage": {"input_tokens": 9}}})
+        _line(kw, {"type": "result", "subtype": "error_during_execution", "is_error": True, "session_id": "sid-1",
+                   "usage": {"input_tokens": 9}})
+        return ProcResult(returncode=1)
+
+    launch.script[:] = [failed_turn]
+    result = launch.run()
+    assert not result.ok and len(launch.calls) == 1
+    assert fo.exhausted_until(1) == 0.0
+    assert "next message" not in (result.error or "")
+
+
+def test_picked_account_2_says_so_once(accounts, launch):
+    accounts.login()
+    accounts.preferred = 2
+    accounts.windows[2] = [_row("hourly", 10)]
+    launch.script[:] = [ok_turn, ok_turn]
+    assert launch.run().ok and launch.run("sid-1").ok
+    assert all(c["env_extra"]["CLAUDE_CONFIG_DIR"] == str(accounts.dirs[2]) for c in launch.calls)
+    texts = [str(e.get("text")) for e in launch.events]
+    assert texts.count("Running on account 2.") == 1
+    assert not any("at its limit" in t for t in texts)
 
 
 def test_account_1_env_unchanged_without_account_2(accounts, launch):

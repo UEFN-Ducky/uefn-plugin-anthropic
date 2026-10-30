@@ -13,10 +13,10 @@ from typing import Any
 
 try:
     from . import claude_auth as auth
-    from .accounts import SECONDARY, account_env
+    from .accounts import SECONDARY, account_env, account_label, set_preferred_account
 except ImportError:
     import claude_auth as auth
-    from accounts import SECONDARY, account_env
+    from accounts import SECONDARY, account_env, account_label, set_preferred_account
 
 LOGIN_TITLE = "Claude Login (account 2)"
 # A phone / Remote View reaches plugin_call over the direct channel, which gives up
@@ -137,7 +137,14 @@ def account2_logout(**_kw: Any) -> dict[str, Any]:
     return {"ok": True, "connected": False, "detail": "Logged out of account 2."}
 
 
+def set_claude_account(account: Any = 1, **_kw: Any) -> dict[str, Any]:
+    """The model picker's Account 1 / Account 2 toggle: next Claude Code turns use this account."""
+    n = set_preferred_account(account)
+    return {"ok": True, "value": str(n), "detail": f"Claude Code chats now use {account_label(n).lower()}."}
+
+
 def register_account_rpcs(api: Any) -> None:
     api.register_panel_rpc("account2_login", account2_login)
     api.register_panel_rpc("account2_status", account2_status)
     api.register_panel_rpc("account2_logout", account2_logout)
+    api.register_panel_rpc("set_claude_account", set_claude_account)

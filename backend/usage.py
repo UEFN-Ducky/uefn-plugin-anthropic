@@ -478,20 +478,51 @@ def account_windows(account: int, *, max_age: float = 60.0) -> list[dict[str, An
     return None
 
 
+def _failover() -> Any:
+    try:
+        from . import failover
+    except ImportError:
+        import failover
+    return failover
+
+
 def _meter_account() -> int:
     try:
-        try:
-            from .failover import current_account
-        except ImportError:
-            from failover import current_account
-        return current_account()
+        return _failover().current_account()
     except Exception:
         return PRIMARY
 
 
-def _for_account(out: dict[str, Any], account: int) -> dict[str, Any]:
-    """Account 2's bars and notices say which account they are about."""
-    if account != SECONDARY:
+def _account_switch() -> dict[str, Any] | None:
+    """The model picker's Account 1 / Account 2 toggle; None until account 2 is logged in."""
+    try:
+        fo = _failover()
+        if not fo.account2_ready():
+            return None
+        value = str(fo.preferred())
+    except Exception:
+        return None
+    return {
+        "plugin_id": "anthropic",
+        "rpc": "set_claude_account",
+        "value": value,
+        "options": [{"id": str(n), "label": account_label(n)} for n in (PRIMARY, SECONDARY)],
+    }
+
+
+def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
+    account = _meter_account()
+    switch = _account_switch()
+    out = _usage_for(account, api_key)
+    if switch is None:
+        return out
+    # Account 2's rows are labelled already; label account 1's too once there are two.
+    return {**(out if account == SECONDARY else _for_account(out, account, always=True)), "switch": switch}
+
+
+def _for_account(out: dict[str, Any], account: int, *, always: bool = False) -> dict[str, Any]:
+    """Bars and notices say which account they are about (account 2, or both once two exist)."""
+    if account != SECONDARY and not always:
         return out
     prefix = account_label(account)
     out = dict(out)
@@ -501,8 +532,7 @@ def _for_account(out: dict[str, Any], account: int) -> dict[str, Any]:
     return out
 
 
-def fetch_usage(api_key: str, *, model: str = "") -> dict[str, Any]:
-    account = _meter_account()
+def _usage_for(account: int, api_key: str) -> dict[str, Any]:
     key = (api_key or "").strip() if account == PRIMARY else ""
     status, rows = _plan_usage(account, keep_expired=bool(key))
     if status == "ok":

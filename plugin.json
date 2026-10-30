@@ -88,11 +88,22 @@
             "connected_rpc": "account2_logout"
           },
           {
+            "id": "claudeAccount",
+            "type": "select",
+            "default": "1",
+            "label": "Use account",
+            "description": "The Claude account Claude Code chats run on. You can also switch it under the usage bars in the model picker.",
+            "options": [
+              { "value": "1", "label": "Account 1" },
+              { "value": "2", "label": "Account 2" }
+            ]
+          },
+          {
             "id": "accountFailover",
             "type": "boolean",
             "default": true,
-            "label": "Switch to account 2 when account 1 is at its limit",
-            "description": "When account 1's 5-hour or weekly limit is at 100%, new Claude Code turns run on account 2, then go back to account 1 once its limit resets."
+            "label": "Switch accounts when one is at its limit",
+            "description": "When the account in use reaches its 5-hour or weekly limit, new Claude Code turns run on the other account, then go back once its limit resets."
           }
         ]
       }

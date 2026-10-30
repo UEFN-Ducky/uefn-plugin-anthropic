@@ -1328,14 +1328,15 @@ class ClaudeCodeAdapter:
                 "text": "Resumed Claude Code session…" if session_id else "Starting Claude Code…",
                 "conv_id": conv_id, "run_id": run_id,
             })
-            # Account 2 runs this turn while account 1 is at its plan limit.
+            # The picked account runs this turn; the other one while it is at its plan limit.
             account = failover.pick_account(cli_path)
             previous_account = failover.begin_turn(account, session_id)
             run_env = _account_run_env(env, account)
-            if account == SECONDARY:
-                push({"type": "status", "text": _switch_text(PRIMARY, SECONDARY), "conv_id": conv_id, "run_id": run_id})
-            elif previous_account == SECONDARY:
-                push({"type": "status", "text": "Account 1 is available again — back on account 1.",
+            picked = failover.preferred()
+            if account != picked:
+                push({"type": "status", "text": _switch_text(picked, account), "conv_id": conv_id, "run_id": run_id})
+            elif previous_account != account:
+                push({"type": "status", "text": f"Running on {account_label(account).lower()}.",
                       "conv_id": conv_id, "run_id": run_id})
             switched_account = False
             # Core asks for this when the session is big and its prompt cache has expired.
@@ -1410,7 +1411,10 @@ class ClaudeCodeAdapter:
                 result = with_mode(result)
                 previous_result = result
                 quiet = _quiet_attempt(state, blocks, streamed)
-                texts = (state.error_text, state.final_text, state.trailing_text(), result.error, proc.stderr_tail)
+                texts = (state.error_text, result.error, proc.stderr_tail)
+                if quiet:
+                    # Only Claude's own message came back; once the model ran, its prose may quote a limit.
+                    texts += (state.final_text, state.trailing_text())
                 if (not terminal and not cancelled() and (not result.ok or quiet)
                         and failover.is_usage_limit_error(*texts) and failover.in_play()):
                     failover.note_limit_hit(account, failover.limit_reset_epoch(*texts))

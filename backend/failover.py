@@ -18,11 +18,13 @@ from typing import Any
 
 try:
     from .accounts import (
-        PRIMARY, SECONDARY, account_config_dir, account_credentials_paths, failover_enabled, normalize_account,
+        PRIMARY, SECONDARY, account_config_dir, account_credentials_paths, account_env, failover_enabled,
+        normalize_account, preferred_account,
     )
 except ImportError:
     from accounts import (
-        PRIMARY, SECONDARY, account_config_dir, account_credentials_paths, failover_enabled, normalize_account,
+        PRIMARY, SECONDARY, account_config_dir, account_credentials_paths, account_env, failover_enabled,
+        normalize_account, preferred_account,
     )
 
 FALLBACK_WAIT_S = 15 * 60
@@ -205,30 +207,51 @@ def logged_in(account: int, cli_path: str = "") -> bool:
     return ok
 
 
-def in_play() -> bool:
-    """Account 2 is set up and Settings allows switching to it."""
+def account2_ready() -> bool:
+    """Account 2 has a login on this PC."""
     # Plugin tests set this so they never read this PC's real account 2 or its usage.
     if os.environ.get("DUCKY_CLAUDE_FAILOVER") == "off":
         return False
     try:
-        return has_credentials(SECONDARY) and failover_enabled()
+        return has_credentials(SECONDARY)
+    except Exception:
+        return False
+
+
+def preferred() -> int:
+    """The picked account; account 2 only while it has a login."""
+    try:
+        account = preferred_account()
+    except Exception:
+        return PRIMARY
+    return account if account == PRIMARY or account2_ready() else PRIMARY
+
+
+def in_play() -> bool:
+    """Account 2 is set up and either picked or allowed as the fallback."""
+    try:
+        return account2_ready() and (failover_enabled() or preferred() == SECONDARY)
     except Exception:
         return False
 
 
 def pick_account(cli_path: str = "") -> int:
-    """The account the next Claude Code turn should run on (1 unless account 1 is at its limit)."""
+    """The account the next Claude Code turn runs on: the picked one unless it is at its limit."""
+    first = preferred()
     try:
         if not in_play():
             return PRIMARY
-        if not account_full(PRIMARY):
-            return PRIMARY
-        if account_full(SECONDARY):
-            first, second = exhausted_until(PRIMARY), exhausted_until(SECONDARY)
-            return SECONDARY if 0 < second < first else PRIMARY
-        return SECONDARY if logged_in(SECONDARY, cli_path) else PRIMARY
+        if first == SECONDARY and not logged_in(SECONDARY, cli_path):
+            first = PRIMARY
+        if not failover_enabled() or not account_full(first):
+            return first
+        second = other_account(first)
+        if account_full(second):
+            a, b = exhausted_until(first), exhausted_until(second)
+            return second if 0 < b < a else first
+        return second if logged_in(second, cli_path) else first
     except Exception:
-        return PRIMARY
+        return first
 
 
 def can_switch_to(account: int, cli_path: str = "") -> bool:
@@ -249,13 +272,14 @@ def current_account() -> int:
     try:
         if not in_play():
             return PRIMARY
+        first = preferred()
         with _LOCK:
             state = _read_state()
-        if normalize_account(state.get("active", PRIMARY)) == SECONDARY and _until(state, PRIMARY) > time.time():
-            return SECONDARY
+        if normalize_account(state.get("active", first)) != first and _until(state, first) > time.time():
+            return other_account(first)
+        return first
     except Exception:
-        pass
-    return PRIMARY
+        return PRIMARY
 
 
 def begin_turn(account: int, session_id: str = "") -> int:
@@ -331,6 +355,8 @@ def carry_session(
     try:
         if not session_id or not _SESSION_ID_RE.match(session_id):
             return False
+        if normalize_account(to_account) == SECONDARY:
+            account_env(SECONDARY)  # Links account 1's projects in first, so most sessions need no copy.
         src_root = account_config_dir(from_account) / "projects"
         dst_root = account_config_dir(to_account) / "projects"
         if normalize_account(from_account) == normalize_account(to_account):

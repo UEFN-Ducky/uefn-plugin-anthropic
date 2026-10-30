@@ -26,6 +26,8 @@ _URL = "https://claude.com/cai/oauth/authorize?code=true&client_id=abc&state=xyz
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(accounts, "secondary_config_dir", lambda: tmp_path / "claude-account-2")
+    # Account 2's folder links account 1's: keep that off this PC's real ~/.claude.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-account-1"))
     monkeypatch.setattr(claude_auth, "_PENDING_PATH", tmp_path / "auth_pending.json")
     monkeypatch.setattr(account_rpc, "_cli_path", lambda: "")
     monkeypatch.setattr(claude_auth, "resolve_claude_bin", lambda *_a, **_k: "claude.exe")
@@ -250,4 +252,18 @@ def test_register_account_rpcs():
     names: list[str] = []
     api = types.SimpleNamespace(register_panel_rpc=lambda name, fn: names.append(name))
     account_rpc.register_account_rpcs(api)
-    assert names == ["account2_login", "account2_status", "account2_logout"]
+    assert names == ["account2_login", "account2_status", "account2_logout", "set_claude_account"]
+
+
+def test_set_claude_account_keeps_the_other_prefs(monkeypatch):
+    from frontend.ui_web import plugin_host_api
+
+    saved = {"anthropic": {"accountFailover": False}}
+    monkeypatch.setattr(plugin_host_api, "prefs_plugin_get", lambda pid: dict(saved.get(pid, {})))
+    monkeypatch.setattr(plugin_host_api, "prefs_plugin_set", lambda pid, prefs: saved.__setitem__(pid, prefs))
+    res = account_rpc.set_claude_account(account="2")
+    assert res["ok"] and res["value"] == "2"
+    assert saved["anthropic"] == {"accountFailover": False, "claudeAccount": "2"}
+    assert accounts.preferred_account() == 2
+    account_rpc.set_claude_account(account="junk")
+    assert accounts.preferred_account() == 1
