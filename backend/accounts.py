@@ -1,109 +1,38 @@
-"""Two Claude Code accounts on one PC: where each one lives and how to run as it.
+"""Claude Code's own login folder, what every other account shares with it, and the
+one-time move of PR #3's second login into core's accounts.
 
-Account 1 is Claude Code's usual login (``~/.claude``, or the ``CLAUDE_CONFIG_DIR``
-Ducky itself was started with). Account 2 is a second login kept in its own Claude
-config folder under Ducky's data, picked by setting ``CLAUDE_CONFIG_DIR`` on the
-``claude`` process. Each folder holds that account's credentials, settings and
-saved sessions, so the two logins never overwrite each other.
+Core keeps the accounts (``backend.agent.accounts``): ``default`` is Claude Code's usual
+login (``~/.claude``, or the ``CLAUDE_CONFIG_DIR`` Ducky itself was started with); every
+other account is its own Claude config folder, picked by setting ``CLAUDE_CONFIG_DIR``.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 PRIMARY = 1
 SECONDARY = 2
-ACCOUNTS = (PRIMARY, SECONDARY)
 CONFIG_ENV = "CLAUDE_CONFIG_DIR"
+CORE_AGENT = "claude_code"
 
-
-def normalize_account(value: object) -> int:
-    """1 or 2; anything else (missing, garbled) is account 1."""
-    try:
-        n = int(str(value).strip())
-    except (TypeError, ValueError):
-        return PRIMARY
-    return n if n in ACCOUNTS else PRIMARY
-
-
-def account_label(account: int) -> str:
-    return f"Account {normalize_account(account)}"
-
-
-def secondary_config_dir() -> Path:
-    from frontend.settings import default_app_data_dir
-
-    return default_app_data_dir() / "coding_agents" / "claude-account-2"
-
-
-def account_config_dir(account: int) -> Path:
-    """The Claude config folder this account reads and writes."""
-    if normalize_account(account) == SECONDARY:
-        return secondary_config_dir()
-    inherited = (os.environ.get(CONFIG_ENV) or "").strip()
-    return Path(inherited) if inherited else Path.home() / ".claude"
-
-
-def account_env(account: int) -> dict[str, str]:
-    """Extra environment that makes a ``claude`` process run as this account.
-
-    Empty for account 1 so its process keeps exactly the environment it had before
-    two accounts existed.
-    """
-    if normalize_account(account) != SECONDARY:
-        return {}
-    folder = secondary_config_dir()
-    folder.mkdir(parents=True, exist_ok=True)
-    share_config(account_config_dir(PRIMARY), folder)
-    return {CONFIG_ENV: str(folder)}
-
-
-# Everything but the login is account 1's: Ducky's skills, the person's hooks, CLAUDE.md
-# and saved sessions (Ducky reads session logs from account 1's folder).
+# Everything but the login is the default account's: Ducky's skills, the person's hooks,
+# CLAUDE.md and saved sessions (Ducky reads session logs from the default folder).
 SHARED_DIRS = ("projects", "skills", "agents", "commands", "plugins", "hooks", "output-styles")
 SHARED_FILES = ("settings.json", "CLAUDE.md")
 
 
-def _link_dir(src: Path, dst: Path) -> None:
-    if os.name == "nt":
-        import _winapi
-
-        _winapi.CreateJunction(str(src), str(dst))  # No admin / Developer Mode needed.
-    else:
-        os.symlink(src, dst, target_is_directory=True)
+def account_config_dir(account: int = PRIMARY) -> Path:
+    """Claude Code's own config folder (the ``default`` account)."""
+    inherited = (os.environ.get(CONFIG_ENV) or "").strip()
+    return Path(inherited) if inherited else Path.home() / ".claude"
 
 
-def share_config(primary: Path, secondary: Path) -> None:
-    """Link account 1's shared folders into account 2's and copy its newer shared files.
+def secondary_config_dir() -> Path:
+    """Where PR #3 kept account 2; only read to move it into core once."""
+    from frontend.settings import default_app_data_dir
 
-    A folder account 2 already has for real is left alone (its sessions are carried over
-    per turn instead). Never raises.
-    """
-    if primary.resolve() == secondary.resolve():
-        return
-    for name in SHARED_DIRS:
-        src, dst = primary / name, secondary / name
-        try:
-            if name == "projects":
-                src.mkdir(parents=True, exist_ok=True)
-            if src.is_dir() and not os.path.lexists(dst):
-                _link_dir(src, dst)
-        except OSError:
-            pass
-    for name in SHARED_FILES:
-        src, dst = primary / name, secondary / name
-        try:
-            if src.is_file() and (not dst.is_file() or dst.stat().st_mtime < src.stat().st_mtime):
-                shutil.copy2(src, dst)
-        except OSError:
-            pass
-
-
-def account_credentials_paths(account: int) -> list[Path]:
-    root = account_config_dir(account)
-    return [root / ".credentials.json", root / "credentials.json"]
+    return default_app_data_dir() / "coding_agents" / "claude-account-2"
 
 
 def plugin_pref(key: str, default: object) -> object:
@@ -117,19 +46,17 @@ def plugin_pref(key: str, default: object) -> object:
     return prefs.get(key, default)
 
 
-def failover_enabled() -> bool:
-    """Settings → "Switch accounts when one is at its limit" (on by default)."""
-    return plugin_pref("accountFailover", True) is not False
-
-
-CORE_AGENT = "claude_code"
+def preferred_account() -> int:
+    """PR #3's "Use account" pick (1 or 2)."""
+    return SECONDARY if str(plugin_pref("claudeAccount", PRIMARY)).strip() == "2" else PRIMARY
 
 
 def migrate_account2() -> str | None:
     """Move a logged-in PR #3 account 2 folder into a core account named "Account 2", once.
 
-    The folder is moved (not copied), so a second call finds nothing to do. Returns the
-    new account id, or None when there was nothing to move or the move failed.
+    The folder is moved (not copied), so a second call finds nothing to do. Its "Use account"
+    pick and "Switch accounts" switch carry over. Returns the new account id, or None when
+    there was nothing to move or the move failed.
     """
     old = secondary_config_dir()
     if not any((old / name).is_file() for name in (".credentials.json", "credentials.json")):
@@ -147,22 +74,8 @@ def migrate_account2() -> str | None:
     try:
         if preferred_account() == SECONDARY:
             core.set_active_account(CORE_AGENT, new_id)
+        if plugin_pref("accountFailover", True) is False:
+            core.set_auto_switch(CORE_AGENT, False)
     except Exception:
         pass
     return new_id
-
-
-PREFERRED_PREF = "claudeAccount"
-
-
-def preferred_account() -> int:
-    """The account the person picked for Claude Code turns (Settings or the model picker)."""
-    return normalize_account(plugin_pref(PREFERRED_PREF, PRIMARY))
-
-
-def set_preferred_account(account: object) -> int:
-    from frontend.ui_web.plugin_host_api import prefs_plugin_get, prefs_plugin_set
-
-    n = normalize_account(account)
-    prefs_plugin_set("anthropic", {**prefs_plugin_get("anthropic"), PREFERRED_PREF: str(n)})
-    return n

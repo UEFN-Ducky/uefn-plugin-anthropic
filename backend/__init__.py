@@ -270,9 +270,14 @@ def _logout(*, cli_path: str = "", **_kw: Any) -> dict[str, Any]:
 
 
 def _account_cli() -> str:
-    from .account_rpc import _cli_path
+    """The Claude Code CLI path set in Settings, or '' for the default lookup."""
+    try:
+        from backend.agent.coding_agents.settings_helpers import coding_agent_cfg
+        from frontend.settings import PanelSettings
 
-    return _cli_path()
+        return str(coding_agent_cfg(PanelSettings.load(), "claude_code").get("cli_path") or "")
+    except Exception:
+        return ""
 
 
 def _account_env(config_dir: Any) -> dict[str, str]:
@@ -317,7 +322,12 @@ def _account_usage(config_dir: Any) -> Any:
 def _account_primary() -> str:
     from .accounts import PRIMARY, account_config_dir
 
-    return str(account_config_dir(PRIMARY))
+    folder = account_config_dir(PRIMARY)
+    try:
+        (folder / "projects").mkdir(parents=True, exist_ok=True)  # So every account links one sessions folder.
+    except OSError:
+        pass
+    return str(folder)
 
 
 def account_hooks() -> dict[str, Any]:
@@ -417,8 +427,4 @@ def register(api) -> None:
     from . import graph_nodes
 
     graph_nodes.register_nodes(api)
-    from .account_rpc import register_account_rpcs
-
-    # Settings → "Second Claude account": log in / status / log out of account 2.
-    register_account_rpcs(api)
     api.log("Anthropic gateway contribution active (Providers + Claude Code + IDE)")

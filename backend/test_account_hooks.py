@@ -35,6 +35,9 @@ def test_registration_carries_the_account_hooks(monkeypatch):
     assert reg["account_shared"]["files"] == list(accounts.SHARED_FILES)
     for hook in ("account_login", "account_status", "account_logout", "account_usage"):
         assert callable(reg[hook])
+    # Core owns account login, status and the picker switch now.
+    rpcs = {c.args[0] for c in api.register_panel_rpc.call_args_list}
+    assert not rpcs & {"account2_login", "account2_status", "account2_logout", "set_claude_account"}
 
 
 def test_login_runs_claude_auth_login_in_the_folder(monkeypatch):

@@ -69,43 +69,6 @@
             ]
           }
         ]
-      },
-      {
-        "tab": "LLMs",
-        "id": "claude-accounts",
-        "title": "Second Claude account",
-        "description": "Log in a second Claude subscription. When account 1 reaches its 5-hour or weekly limit, Claude Code chats carry on with account 2.",
-        "order": 85,
-        "properties": [
-          {
-            "id": "account2Login",
-            "type": "action",
-            "label": "Log in account 2",
-            "description": "Opens a Claude Login (account 2) tab and the sign-in page. In the browser, sign in with your OTHER Claude account (log out of account 1 on claude.ai first if needed). If the page shows a code, paste it in that tab.",
-            "rpc": "account2_login",
-            "status_rpc": "account2_status",
-            "connected_label": "Log out account 2",
-            "connected_rpc": "account2_logout"
-          },
-          {
-            "id": "claudeAccount",
-            "type": "select",
-            "default": "1",
-            "label": "Use account",
-            "description": "The Claude account Claude Code chats run on. You can also switch it under the usage bars in the model picker.",
-            "options": [
-              { "value": "1", "label": "Account 1" },
-              { "value": "2", "label": "Account 2" }
-            ]
-          },
-          {
-            "id": "accountFailover",
-            "type": "boolean",
-            "default": true,
-            "label": "Switch accounts when one is at its limit",
-            "description": "When the account in use reaches its 5-hour or weekly limit, new Claude Code turns run on the other account, then go back once its limit resets."
-          }
-        ]
       }
     ],
     "walkthrough": {

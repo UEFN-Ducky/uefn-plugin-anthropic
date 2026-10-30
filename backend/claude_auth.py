@@ -23,7 +23,6 @@ _DONE_WORDS = frozenset({"done", "logged in", "ok", "ready", "continue", "yes", 
 _PENDING_PATH = default_app_data_dir() / "coding_agents" / "auth_pending.json"
 SETTINGS_LOGIN_HREF = "ducky://settings.llms/anthropic#login"
 SETTINGS_CONV = "__settings__"
-ACCOUNT2_LOGIN_CONV = "__settings_account2__"
 _URL_WAIT_S = 12.0
 _LINK_GIVE_UP_S = 30.0
 _NO_LINK = "Claude never printed a sign-in link. Check the Claude Login tab, then press Log in again."
@@ -71,26 +70,20 @@ def resolve_claude_bin(override: str = "") -> str:
     return _default_claude_bin()
 
 
-def _run_as(account: int, config_dir: Any) -> dict[str, str]:
-    """Env that runs ``claude`` as a core account's folder, else as account 1 or 2."""
-    if config_dir:
-        return {"CLAUDE_CONFIG_DIR": str(config_dir)}
-    try:
-        from .accounts import account_env
-    except ImportError:
-        from accounts import account_env
-    return account_env(account)
+def _run_as(config_dir: Any) -> dict[str, str]:
+    """Env that runs ``claude`` as a core account's folder; {} for Claude's own login."""
+    return {"CLAUDE_CONFIG_DIR": str(config_dir)} if config_dir else {}
 
 
-def claude_auth_status(cli_path: str = "", *, account: int = 1, config_dir: Any = None) -> dict[str, Any]:
-    """Return {loggedIn, ...} from `claude auth status --json` for account 1 or 2, or ``config_dir``."""
+def claude_auth_status(cli_path: str = "", *, config_dir: Any = None) -> dict[str, Any]:
+    """Return {loggedIn, ...} from `claude auth status --json` (for ``config_dir`` when given)."""
     binary = resolve_claude_bin(cli_path)
     if not binary:
         return {"loggedIn": False, "error": "claude CLI not found"}
     try:
         from frontend.ui_web.terminal.path_env import env_with_fresh_path
 
-        env = {**env_with_fresh_path(), **_run_as(account, config_dir)}
+        env = {**env_with_fresh_path(), **_run_as(config_dir)}
         kwargs: dict[str, Any] = {
             "capture_output": True,
             "text": True,
@@ -113,8 +106,8 @@ def claude_auth_status(cli_path: str = "", *, account: int = 1, config_dir: Any 
     return {"loggedIn": False}
 
 
-def is_claude_logged_in(cli_path: str = "", *, account: int = 1) -> bool:
-    return bool(claude_auth_status(cli_path, account=account).get("loggedIn"))
+def is_claude_logged_in(cli_path: str = "", *, config_dir: Any = None) -> bool:
+    return bool(claude_auth_status(cli_path, config_dir=config_dir).get("loggedIn"))
 
 
 def claude_definitely_logged_out(cli_path: str = "", *, retry_after_s: float = 1.0) -> bool:
@@ -137,7 +130,7 @@ def _logout_argv(binary: str) -> list[str]:
     return [binary, "auth", "logout"]
 
 
-def claude_logout(cli_path: str = "", *, account: int = 1, config_dir: Any = None) -> dict[str, Any]:
+def claude_logout(cli_path: str = "", *, config_dir: Any = None) -> dict[str, Any]:
     """Sign out of the Claude Code CLI so Settings can re-run the login flow."""
     binary = resolve_claude_bin(cli_path)
     if not binary:
@@ -145,7 +138,7 @@ def claude_logout(cli_path: str = "", *, account: int = 1, config_dir: Any = Non
     try:
         from frontend.ui_web.terminal.path_env import env_with_fresh_path
 
-        env = {**env_with_fresh_path(), **_run_as(account, config_dir)}
+        env = {**env_with_fresh_path(), **_run_as(config_dir)}
         kwargs: dict[str, Any] = {
             "capture_output": True,
             "text": True,
@@ -158,27 +151,17 @@ def claude_logout(cli_path: str = "", *, account: int = 1, config_dir: Any = Non
         proc = subprocess.run(_logout_argv(binary), **kwargs)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
-    if config_dir:
-        pass  # A core account's own folder: account 1's pending login stays untouched.
-    elif account == 2:
-        # Account 1's pending login (and its chats' deferred prompts) stay untouched.
-        clear_pending_auth(ACCOUNT2_LOGIN_CONV)
-    else:
+    if not config_dir:
+        # A core account's own folder leaves the default login's pending sign-in alone.
         try:
             if _PENDING_PATH.is_file():
                 _PENDING_PATH.unlink()
         except OSError:
             pass
-    still_in = (
-        claude_auth_status(cli_path, config_dir=config_dir).get("loggedIn")
-        if config_dir
-        else is_claude_logged_in(cli_path, account=account)
-    )
-    if still_in:
+    if is_claude_logged_in(cli_path, config_dir=config_dir):
         err = ((proc.stderr or proc.stdout or "logout did not take effect").strip())[:300]
         return {"ok": False, "logged_in": True, "error": err}
-    message = "Logged out of account 2." if account == 2 and not config_dir else "Logged out of Claude Code."
-    return {"ok": True, "logged_in": False, "message": message}
+    return {"ok": True, "logged_in": False, "message": "Logged out of Claude Code."}
 
 
 def extract_auth_url(text: str) -> str:

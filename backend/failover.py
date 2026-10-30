@@ -1,117 +1,90 @@
-"""Run Claude Code chats on account 2 while account 1 is at its plan limit.
+"""Claude Code on core's accounts: which login a turn runs as, and moving on when one is full.
 
-Saved state (``coding_agents/claude_accounts_state.json``) holds, per account, when its
-5-hour or weekly limit resets (``exhausted_until``, epoch s) and which account the last
-turn ran on. Nothing here raises: an unknown answer keeps chats on account 1.
+Core picks the account before launch (``coding_agent_account_env``) and keeps which one
+is exhausted until when. This module reads those answers for the adapter, reports a limit
+hit, asks core for the next account, and carries the chat's saved session between account
+folders so ``--resume`` finds it. Nothing here raises: an unknown answer keeps the turn as is.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
-import threading
 import time
 from pathlib import Path
 from typing import Any
 
 try:
-    from .accounts import (
-        PRIMARY, SECONDARY, account_config_dir, account_credentials_paths, account_env, failover_enabled,
-        normalize_account, preferred_account,
-    )
+    from .accounts import PRIMARY, account_config_dir as _plugin_config_dir
 except ImportError:
-    from accounts import (
-        PRIMARY, SECONDARY, account_config_dir, account_credentials_paths, account_env, failover_enabled,
-        normalize_account, preferred_account,
-    )
+    from accounts import PRIMARY, account_config_dir as _plugin_config_dir
 
+AGENT = "claude_code"
+CONFIG_ENV = "CLAUDE_CONFIG_DIR"
 FALLBACK_WAIT_S = 15 * 60
-_CHECK_TTL_S = 60.0
-_LOGIN_TTL_S = 300.0
-_LOCK = threading.Lock()
-_CHECKED: dict[int, tuple[float, bool]] = {}
-_LOGIN: dict[int, tuple[float, bool]] = {}
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
-def other_account(account: int) -> int:
-    return PRIMARY if normalize_account(account) == SECONDARY else SECONDARY
+def _core() -> Any:
+    from backend.agent import accounts
+
+    return accounts
 
 
-# ── saved state ─────────────────────────────────────────────────────────
-
-
-def state_path() -> Path:
-    from frontend.settings import default_app_data_dir
-
-    return default_app_data_dir() / "coding_agents" / "claude_accounts_state.json"
-
-
-def _read_state() -> dict[str, Any]:
+def in_play() -> bool:
+    """Two or more Claude Code accounts exist."""
+    # Plugin tests set this so they never read or mark this PC's real accounts.
+    if os.environ.get("DUCKY_CLAUDE_FAILOVER") == "off":
+        return False
     try:
-        data = json.loads(state_path().read_text(encoding="utf-8"))
+        return len(_core().list_accounts(AGENT)) > 1
     except Exception:
-        return {}
-    return data if isinstance(data, dict) else {}
+        return False
 
 
-def _write_state(state: dict[str, Any]) -> None:
+def current_account() -> str:
+    """The account core launched this turn as."""
     try:
-        path = state_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        return _core().current_account(AGENT)
     except Exception:
-        pass
+        return "default"
 
 
-def _until(state: dict[str, Any], account: int) -> float:
-    accounts = state.get("accounts")
-    entry = accounts.get(str(account)) if isinstance(accounts, dict) else None
-    value = entry.get("exhausted_until") if isinstance(entry, dict) else None
-    return float(value) if isinstance(value, (int, float)) and value > 0 else 0.0
+def picked_account() -> str:
+    try:
+        return _core().active_account(AGENT)
+    except Exception:
+        return "default"
 
 
-def exhausted_until(account: int) -> float:
-    """When this account's limit resets (epoch s); 0 when it isn't known to be at a limit."""
-    with _LOCK:
-        return _until(_read_state(), normalize_account(account))
+def label(account: str) -> str:
+    try:
+        return next((a["label"] for a in _core().list_accounts(AGENT) if a["id"] == account), account)
+    except Exception:
+        return account
 
 
-def mark_exhausted(account: int, until: float | None = None) -> float:
-    """Record that this account is at its limit until ``until`` (default: 15 min from now)."""
-    account = normalize_account(account)
-    now = time.time()
-    when = float(until) if until and until > now else now + FALLBACK_WAIT_S
-    with _LOCK:
-        state = _read_state()
-        accounts = state.get("accounts") if isinstance(state.get("accounts"), dict) else {}
-        entry = accounts.get(str(account)) if isinstance(accounts.get(str(account)), dict) else {}
-        accounts[str(account)] = {**entry, "exhausted_until": when}
-        state["accounts"] = accounts
-        _write_state(state)
-        _CHECKED.pop(account, None)
-    return when
+def config_dir(account: str) -> Path:
+    """The Claude config folder this account reads and writes (``default`` = Claude's own)."""
+    try:
+        folder = _core().account_config_dir(AGENT, account)
+    except Exception:
+        folder = None
+    return Path(folder) if folder else _plugin_config_dir(PRIMARY)
 
 
-def last_active() -> int:
-    with _LOCK:
-        return normalize_account(_read_state().get("active", PRIMARY))
+def account_dirs() -> list[Path]:
+    try:
+        return [config_dir(a["id"]) for a in _core().list_accounts(AGENT)]
+    except Exception:
+        return []
 
 
-def set_active(account: int) -> int:
-    """Remember the account this turn runs on; returns the one the previous turn used."""
-    account = normalize_account(account)
-    with _LOCK:
-        state = _read_state()
-        previous = normalize_account(state.get("active", PRIMARY))
-        if previous != account or "active" not in state:
-            state["active"] = account
-            _write_state(state)
-    return previous
+def run_env(env: dict[str, str], account_env: dict[str, str]) -> dict[str, str]:
+    """The turn's env with this account's (``{}`` = Claude's own login) in place of the launch one."""
+    base = {k: v for k, v in env.items() if k != CONFIG_ENV}
+    return {**base, **account_env}
 
 
 # ── limits ──────────────────────────────────────────────────────────────
@@ -138,162 +111,40 @@ def full_until(rows: list[dict[str, Any]] | None, now: float | None = None) -> f
     return until
 
 
-def _windows(account: int, *, max_age: float = 60.0) -> list[dict[str, Any]] | None:
+def _windows(account: str) -> list[dict[str, Any]] | None:
     try:
         try:
             from .usage import account_windows
         except ImportError:
             from usage import account_windows
-        return account_windows(account, max_age=max_age)
+        folder = _core().account_config_dir(AGENT, account)
+        return account_windows(str(folder) if folder else PRIMARY, max_age=0)
     except Exception:
         return None
 
 
-def account_full(account: int) -> bool:
-    """True when this account's 5-hour or weekly limit is used up (checked at most once a minute)."""
-    account = normalize_account(account)
+def report_limit(account: str, reset_at: float | None = None) -> None:
+    """A turn hit this account's limit: core marks it full until the message's reset, a fresh
+    usage check's, or 15 min."""
     now = time.time()
-    if exhausted_until(account) > now:
-        return True
-    with _LOCK:
-        hit = _CHECKED.get(account)
-    if hit and now - hit[0] < _CHECK_TTL_S and not hit[1]:
-        return False
-    until = full_until(_windows(account), now)
-    if until:
-        mark_exhausted(account, until)
-        return True
-    with _LOCK:
-        _CHECKED[account] = (now, False)
-    return False
-
-
-def note_limit_hit(account: int, reset_at: float | None = None) -> float:
-    """A turn hit this account's limit: record until when (message, fresh check, or 15 min)."""
-    now = time.time()
-    until = reset_at if reset_at and reset_at > now else None
-    if until is None:
-        until = full_until(_windows(account, max_age=0), now)
-    return mark_exhausted(account, until)
-
-
-def has_credentials(account: int) -> bool:
+    until = reset_at if reset_at and reset_at > now else full_until(_windows(account), now)
     try:
-        return any(path.is_file() for path in account_credentials_paths(account))
+        _core().report_limit(AGENT, account, until)
     except Exception:
-        return False
+        pass
 
 
-def logged_in(account: int, cli_path: str = "") -> bool:
-    """Account 1 is assumed logged in; account 2 asks ``claude auth status`` (cached 5 min)."""
-    account = normalize_account(account)
-    if account != SECONDARY:
-        return True
-    now = time.time()
-    with _LOCK:
-        hit = _LOGIN.get(account)
-    if hit and now - hit[0] < _LOGIN_TTL_S:
-        return hit[1]
+def next_account(account: str) -> tuple[str | None, dict[str, str]]:
+    """Core's next pick after ``account`` filled up, with its launch env; (None, {}) when it is
+    ``account``, or full too (auto-switch off, or every account is at its limit)."""
     try:
-        try:
-            from .claude_auth import is_claude_logged_in
-        except ImportError:
-            from claude_auth import is_claude_logged_in
-        ok = bool(is_claude_logged_in(cli_path, account=SECONDARY))
+        env = _core().coding_agent_account_env(AGENT)
+        other = _core().current_account(AGENT)
+        if other == account or _core().exhausted_until(AGENT, other):
+            return None, {}
     except Exception:
-        ok = False
-    with _LOCK:
-        _LOGIN[account] = (now, ok)
-    return ok
-
-
-def account2_ready() -> bool:
-    """Account 2 has a login on this PC."""
-    # Plugin tests set this so they never read this PC's real account 2 or its usage.
-    if os.environ.get("DUCKY_CLAUDE_FAILOVER") == "off":
-        return False
-    try:
-        return has_credentials(SECONDARY)
-    except Exception:
-        return False
-
-
-def preferred() -> int:
-    """The picked account; account 2 only while it has a login."""
-    try:
-        account = preferred_account()
-    except Exception:
-        return PRIMARY
-    return account if account == PRIMARY or account2_ready() else PRIMARY
-
-
-def in_play() -> bool:
-    """Account 2 is set up and either picked or allowed as the fallback."""
-    try:
-        return account2_ready() and (failover_enabled() or preferred() == SECONDARY)
-    except Exception:
-        return False
-
-
-def pick_account(cli_path: str = "") -> int:
-    """The account the next Claude Code turn runs on: the picked one unless it is at its limit."""
-    first = preferred()
-    try:
-        if not in_play():
-            return PRIMARY
-        if first == SECONDARY and not logged_in(SECONDARY, cli_path):
-            first = PRIMARY
-        if not failover_enabled() or not account_full(first):
-            return first
-        second = other_account(first)
-        if account_full(second):
-            a, b = exhausted_until(first), exhausted_until(second)
-            return second if 0 < b < a else first
-        return second if logged_in(second, cli_path) else first
-    except Exception:
-        return first
-
-
-def can_switch_to(account: int, cli_path: str = "") -> bool:
-    """Whether a turn that hit the other account's limit may move to ``account`` now."""
-    try:
-        account = normalize_account(account)
-        if not failover_enabled():
-            return False
-        if account == SECONDARY and not (has_credentials(SECONDARY) and logged_in(SECONDARY, cli_path)):
-            return False
-        return not account_full(account)
-    except Exception:
-        return False
-
-
-def current_account() -> int:
-    """The account chats run on now, from saved state only (no network): feeds the usage meter."""
-    try:
-        if not in_play():
-            return PRIMARY
-        first = preferred()
-        with _LOCK:
-            state = _read_state()
-        if normalize_account(state.get("active", first)) != first and _until(state, first) > time.time():
-            return other_account(first)
-        return first
-    except Exception:
-        return PRIMARY
-
-
-def begin_turn(account: int, session_id: str = "") -> int:
-    """Remember the account this turn runs on and bring its session over from the other one.
-
-    Returns the account the previous turn ran on. Without account 2 nothing is touched.
-    """
-    account = normalize_account(account)
-    if account == PRIMARY and not in_play():
-        return PRIMARY
-    previous = set_active(account)
-    if session_id:
-        carry_session(session_id, other_account(account), account)
-    return previous
+        return None, {}
+    return other, env
 
 
 # ── Claude Code's limit messages ────────────────────────────────────────
@@ -330,36 +181,33 @@ def limit_reset_epoch(*texts: Any) -> float | None:
 # ── sessions ────────────────────────────────────────────────────────────
 
 
-def session_snapshot(session_id: str, account: int) -> dict[str, int]:
-    """Size of each saved copy of this session on ``account``, keyed by its project folder."""
+def session_snapshot(session_id: str, folder: Path) -> dict[str, int]:
+    """Size of each saved copy of this session in a config folder, keyed by its project folder."""
     try:
         if not session_id or not _SESSION_ID_RE.match(session_id):
             return {}
-        root = account_config_dir(account) / "projects"
+        root = Path(folder) / "projects"
         return {src.parent.name: src.stat().st_size for src in root.glob(f"*/{session_id}.jsonl")}
     except Exception:
         return {}
 
 
 def carry_session(
-    session_id: str, from_account: int, to_account: int, *, upto: dict[str, int] | None = None,
+    session_id: str, from_dir: Path, to_dir: Path, *, upto: dict[str, int] | None = None,
 ) -> bool:
-    """Copy a saved Claude Code session into the other account's folder so ``--resume`` finds it.
+    """Copy a saved Claude Code session into another account's folder so ``--resume`` finds it.
 
     Claude keeps sessions at ``<config>/projects/<cwd-slug>/<id>.jsonl``. The copy is made when
     missing or older than the source. ``upto`` (a ``session_snapshot``) copies only what the
     transcript held then: Claude appends each turn, so a turn that hit the limit and is replayed
-    on the other account doesn't show the person's message twice. True when the session is
-    available on ``to_account``.
+    on another account doesn't show the person's message twice. True when the session is
+    available in ``to_dir``.
     """
     try:
         if not session_id or not _SESSION_ID_RE.match(session_id):
             return False
-        if normalize_account(to_account) == SECONDARY:
-            account_env(SECONDARY)  # Links account 1's projects in first, so most sessions need no copy.
-        src_root = account_config_dir(from_account) / "projects"
-        dst_root = account_config_dir(to_account) / "projects"
-        if normalize_account(from_account) == normalize_account(to_account):
+        src_root, dst_root = Path(from_dir) / "projects", Path(to_dir) / "projects"
+        if Path(from_dir).resolve() == Path(to_dir).resolve():
             return any(src_root.glob(f"*/{session_id}.jsonl"))
         found = False
         for src in src_root.glob(f"*/{session_id}.jsonl"):
@@ -383,3 +231,11 @@ def carry_session(
         return found or any(dst_root.glob(f"*/{session_id}.jsonl"))
     except Exception:
         return False
+
+
+def gather_session(session_id: str, folder: Path) -> None:
+    """Bring the newest copy of this session from any account's folder into ``folder``."""
+    if not session_id:
+        return
+    for other in account_dirs():
+        carry_session(session_id, other, folder)
