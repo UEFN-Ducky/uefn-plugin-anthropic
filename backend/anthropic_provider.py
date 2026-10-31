@@ -38,6 +38,11 @@ def is_quota_error(text: str) -> bool:
     return bool(_QUOTA_RE.search(text or ""))
 
 
+def _signed(blocks: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Thinking blocks the API takes back: signed thinking and redacted thinking."""
+    return [dict(b) for b in blocks or [] if b.get("type") == "redacted_thinking" or b.get("signature")]
+
+
 class AnthropicProvider:
     def __init__(self, api_key: str, model: str, *, thinking_effort: str = "off") -> None:
         self._api_key = api_key
@@ -67,13 +72,10 @@ class AnthropicProvider:
                 )
                 continue
             if m.role == "assistant" and m.tool_calls:
-                blocks: list[dict[str, Any]] = []
-                # Prefer signed thinking blocks from the live turn (required by Anthropic
-                # when continuing a tool-use loop with extended thinking).
-                if m.thinking_blocks:
-                    blocks.extend(m.thinking_blocks)
-                elif m.thinking and self._thinking_effort != "off":
-                    blocks.append({"type": "thinking", "thinking": m.thinking})
+                # Signed thinking blocks from the live turn (required by Anthropic when
+                # continuing a tool-use loop with extended thinking). Thinking replayed from
+                # history has no signature and the API refuses it (400), so it is left out.
+                blocks: list[dict[str, Any]] = _signed(m.thinking_blocks)
                 if m.content:
                     blocks.append({"type": "text", "text": m.content})
                 for tc in m.tool_calls:
@@ -90,19 +92,12 @@ class AnthropicProvider:
             if m.role == "user" and m.attachments:
                 out.append({"role": "user", "content": build_anthropic_user_content(m.content, m.attachments)})
                 continue
-            if m.role == "assistant":
-                if m.thinking_blocks:
-                    blocks = list(m.thinking_blocks)
-                    if m.content:
-                        blocks.append({"type": "text", "text": m.content})
-                    out.append({"role": "assistant", "content": blocks})
-                    continue
-                if m.thinking and self._thinking_effort != "off":
-                    blocks = [{"type": "thinking", "thinking": m.thinking}]
-                    if m.content:
-                        blocks.append({"type": "text", "text": m.content})
-                    out.append({"role": "assistant", "content": blocks})
-                    continue
+            if m.role == "assistant" and _signed(m.thinking_blocks):
+                blocks = _signed(m.thinking_blocks)
+                if m.content:
+                    blocks.append({"type": "text", "text": m.content})
+                out.append({"role": "assistant", "content": blocks})
+                continue
             out.append({"role": m.role, "content": m.content})
         return out
 
