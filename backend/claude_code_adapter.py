@@ -789,7 +789,8 @@ class _StreamState:
         if not isinstance(args, dict):
             args = {}
         started = float(info.get("started_at") or 0.0)
-        ms = int((time.monotonic() - started) * 1000) if started else 0
+        ended = float(info.get("ended_at") or 0.0) or time.monotonic()
+        ms = int((ended - started) * 1000) if started else 0
         status = "error" if failed else "success"
         tool_payload: dict[str, Any] = {
             "name": name,
@@ -834,18 +835,23 @@ class _StreamState:
         if tool_id == self._shown_tool:
             self._push_tool_done(tool_id, failed=failed, result_text=result_text)
             self._shown_tool = None
-            if self._tool_queue:
-                self._push_tool_start(self._tool_queue.pop(0))
-            return
-        if tool_id in self._tool_queue:
-            # Resolved out of order: show its intent right before its result so
-            # the positional pairing still lines up.
-            self._tool_queue.remove(tool_id)
+            self._show_next_queued()
+        elif tool_id in self._tool_queue:
+            # Resolved before the open chip: hold the result until its turn. Opening
+            # it now would put its chip between the open chip and that chip's result,
+            # and the open chip would spin forever (the UI pairs positionally).
+            self._tools[tool_id]["held"] = (failed, result_text)
+            self._tools[tool_id]["ended_at"] = time.monotonic()
+
+    def _show_next_queued(self) -> None:
+        """Open the next queued chip; close it at once when its result already arrived."""
+        while self._shown_tool is None and self._tool_queue:
+            tool_id = self._tool_queue.pop(0)
             self._push_tool_start(tool_id)
-            self._shown_tool = None
-            self._push_tool_done(tool_id, failed=failed, result_text=result_text)
-            if self._tool_queue and self._shown_tool is None:
-                self._push_tool_start(self._tool_queue.pop(0))
+            held = self._tools.get(tool_id, {}).get("held")
+            if held:
+                self._push_tool_done(tool_id, failed=held[0], result_text=held[1])
+                self._shown_tool = None
 
     def finish_unresolved_tools(self, *, cancelled: bool) -> None:
         """Turn ended with chips still open — close them so nothing spins forever."""
@@ -857,7 +863,9 @@ class _StreamState:
                 continue
             if tool_id != self._shown_tool:
                 self._push_tool_start(tool_id)
-            self._push_tool_done(tool_id, failed=True, result_text=note)
+            held = self._tools[tool_id].get("held")
+            failed, text = held if held else (True, note)
+            self._push_tool_done(tool_id, failed=failed, result_text=text)
             self._shown_tool = None
 
     def _emit(self, event: dict[str, Any]) -> None:

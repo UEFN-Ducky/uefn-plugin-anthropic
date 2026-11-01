@@ -662,6 +662,20 @@ def test_uncertain_capacity_is_sticky_before_callback_parsing(launch, monkeypatc
     classifier.assert_not_called()
     launch.update.assert_not_called()
 
+def test_parallel_tool_finishing_first_never_strands_open_chip():
+    events = []
+    state = a._StreamState("c1", "r1", events.append)
+    line = lambda kind, content: state.on_line(json.dumps({"type": kind, "message": {"content": content}}))
+    line("assistant", [{"type": "tool_use", "id": "A", "name": "Write", "input": {}},
+                       {"type": "tool_use", "id": "B", "name": "Write", "input": {}}])
+    line("user", [{"type": "tool_result", "tool_use_id": "B", "is_error": True, "content": "denied"}])
+    line("user", [{"type": "tool_result", "tool_use_id": "A", "content": "ok"}])
+    chips = [(e["type"], e["tool"]["status"], e["tool"].get("result")) for e in events if e["type"] in ("tool", "tool_done")]
+    # Strictly alternating open/close, so the UI's positional pairing lines up.
+    assert chips == [("tool", "pending", None), ("tool_done", "success", "ok"),
+                     ("tool", "pending", None), ("tool_done", "error", "denied")]
+
+
 def test_streaming_tool_input_reports_progress():
     events = []
     state = a._StreamState("c1", "r1", events.append)
