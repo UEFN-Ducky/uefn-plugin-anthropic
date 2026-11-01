@@ -662,6 +662,17 @@ def test_uncertain_capacity_is_sticky_before_callback_parsing(launch, monkeypatc
     classifier.assert_not_called()
     launch.update.assert_not_called()
 
+def test_streaming_tool_input_reports_progress():
+    events = []
+    state = a._StreamState("c1", "r1", events.append)
+    feed = lambda ev: state.on_line(json.dumps({"type": "stream_event", "event": ev}))
+    feed({"type": "content_block_start", "content_block": {"type": "tool_use", "name": "mcp__uefn__workspace_write_file"}})
+    state._input_last_emit = 0.0
+    feed({"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": "x" * 2048}})
+    texts = [e["text"] for e in events if e["type"] == "status"]
+    assert texts == ["Writing workspace_write_file · 0 chars", "Writing workspace_write_file · 2.0 KB"]
+
+
 
 @pytest.mark.parametrize("key", CAPACITY_KEYS)
 @pytest.mark.parametrize("value", [0, 200000, 200000.0])

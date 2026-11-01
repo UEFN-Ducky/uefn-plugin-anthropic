@@ -687,6 +687,10 @@ class _StreamState:
         self._delta_buf: list[str] = []
         self._delta_kind: str = "text_delta"
         self._delta_last_flush = 0.0
+        # Tool input streaming progress (input_json_delta).
+        self._input_tool = "tool"
+        self._input_chars = 0
+        self._input_last_emit = 0.0
         self.stdin_writer: Any = None
         self.pending_stdin = ""
 
@@ -915,12 +919,34 @@ class _StreamState:
         elif kind == "result":
             self._on_result(data)
 
+    def _input_progress(self, force: bool = False) -> None:
+        """Status line while the model streams a tool call's input (a big file can take minutes)."""
+        now = time.monotonic()
+        if not force and now - self._input_last_emit < 1.0:
+            return
+        self._input_last_emit = now
+        self.flush_stream()
+        size = self._input_chars
+        amount = f"{size / 1024:.1f} KB" if size >= 1024 else f"{size} chars"
+        self._emit({"type": "status", "text": f"Writing {self._input_tool} · {amount}"})
+
     def _on_stream_event(self, event: dict[str, Any]) -> None:
-        if str(event.get("type") or "") != "content_block_delta":
+        etype = str(event.get("type") or "")
+        if etype == "content_block_start":
+            block = event.get("content_block") or {}
+            if block.get("type") == "tool_use":
+                self._input_tool = str(block.get("name") or "tool").removeprefix("mcp__uefn__")
+                self._input_chars = 0
+                self._input_progress(force=True)
+            return
+        if etype != "content_block_delta":
             return
         delta = event.get("delta") or {}
         dtype = str(delta.get("type") or "")
-        if dtype == "text_delta":
+        if dtype == "input_json_delta":
+            self._input_chars += len(str(delta.get("partial_json") or ""))
+            self._input_progress()
+        elif dtype == "text_delta":
             text = str(delta.get("text") or "")
             if text:
                 self._saw_delta = True
