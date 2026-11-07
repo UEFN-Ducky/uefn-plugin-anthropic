@@ -546,6 +546,29 @@ def _quiet_attempt(state: "_StreamState", blocks: list[dict[str, Any]], streamed
 
 
 _COMPACT_TIMEOUT_S = 300.0
+_TOOLS_RETRY_WAIT_S = 10.0
+
+
+def _wait_for_ducky_tools(cancel: threading.Event | None) -> None:
+    """Up to 10 s for Ducky's shared tool server to answer again (it restarts, or a burst of
+    chats starts at once); a short pause when there is no shared server to ask."""
+    deadline = time.monotonic() + _TOOLS_RETRY_WAIT_S
+    try:
+        from backend.bridge import shared_mcp
+
+        shared = shared_mcp.enabled()
+    except Exception:  # noqa: BLE001 - older core: just pause
+        shared_mcp, shared = None, False
+    while time.monotonic() < deadline and not (cancel is not None and cancel.is_set()):
+        try:
+            if shared and shared_mcp._daemon_answers(timeout_s=min(3.0, deadline - time.monotonic())):
+                return
+        except Exception:  # noqa: BLE001
+            shared = False
+        if not shared:
+            (cancel or threading.Event()).wait(2.0)
+            return
+        (cancel or threading.Event()).wait(0.25)
 
 
 def _compact_cold_session(argv: list[str], *, cwd: str, env: dict[str, str], conv_id: str, run_id: str,
@@ -1365,6 +1388,7 @@ class ClaudeCodeAdapter:
                 if account != picked:
                     push({"type": "status", "text": _switch_text(picked, account), "conv_id": conv_id, "run_id": run_id})
             switched_account = False
+            tools_retried = False
             # Core asks for this when the session is big and its prompt cache has expired.
             if session_id and env.get("DUCKY_COMPACT_FIRST") == "1" and not cancelled():
                 compacted = _compact_cold_session(argv, cwd=cwd, env=run_env, conv_id=conv_id, run_id=run_id,
@@ -1426,6 +1450,14 @@ class ClaudeCodeAdapter:
                     result.error = "Claude Code exited unsuccessfully. Partial output was retained; review it before retrying."
                     result.output_tail = ""
                 if not terminal and (state.ducky_connection_failed or (proc.returncode == 0 and not state.ducky_connected)):
+                    if not tools_retried and not cancelled():
+                        # Nov 7 2026: a burst of chats died in ~3 s with uefn=failed at init while the
+                        # shared tool server restarted. Wait for it and run the same turn once more.
+                        tools_retried = True
+                        push({"type": "status", "conv_id": conv_id, "run_id": run_id,
+                              "text": "Ducky's tools didn't connect — waiting for them and trying again…"})
+                        _wait_for_ducky_tools(cancel)
+                        continue
                     result.ok = False
                     result.status = "error"
                     result.error = "Ducky's tools didn't connect"

@@ -782,6 +782,8 @@ def test_read_only_turn_contract_has_zero_project_changes(launch, monkeypatch, t
 @pytest.mark.parametrize("servers", [None, [], [{"name": "other", "status": "connected"}],
                                       [{"name": "uefn", "status": "failed"}], "malformed", "no-init"])
 def test_missing_ducky_connection_cannot_answer(launch, monkeypatch, session, servers):
+    waits = []
+    monkeypatch.setattr(a, "_wait_for_ducky_tools", waits.append)
     def process(**kw):
         launch.calls.append(kw)
         if servers != "no-init":
@@ -795,8 +797,40 @@ def test_missing_ducky_connection_cannot_answer(launch, monkeypatch, session, se
     assert not result.ok and result.error == "Ducky's tools didn't connect"
     assert not result.reply_text and not result.blocks and not result.streamed
     assert not any(e.get("type") == "text_delta" for e in launch.events)
-    assert len(launch.calls) == 1
+    assert len(launch.calls) == 2 and len(waits) == 1  # one wait-and-retry, then the error
     launch.update.assert_not_called()
+
+
+@pytest.mark.parametrize("session", ["", "prior-session"])
+def test_tools_failed_at_init_retries_once_and_answers(launch, monkeypatch, session):
+    """Nov 7 2026 burst: uefn=failed at init (shared tools restarting) used to end the turn in ~3 s."""
+    waits = []
+    monkeypatch.setattr(a, "_wait_for_ducky_tools", waits.append)
+    def process(**kw):
+        launch.calls.append(kw)
+        if len(launch.calls) == 1:
+            kw["on_line"](json.dumps({"type": "system", "subtype": "init",
+                                      "mcp_servers": [{"name": "uefn", "status": "failed"}]}))
+            kw["on_line"](json.dumps({"type": "result", "result": "no tools answer"}))
+        else:
+            emit_success(kw)
+        return ProcResult(returncode=0)
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    result = launch.run(session)
+    assert result.ok and result.reply_text == "answer"
+    assert len(launch.calls) == 2 and len(waits) == 1
+    assert launch.calls[0]["argv"] == launch.calls[1]["argv"]
+    assert any("trying again" in str(e.get("text")) for e in launch.events)
+
+
+def test_wait_for_ducky_tools_returns_when_daemon_answers(monkeypatch):
+    asks = []
+    shared_mcp = types.SimpleNamespace(enabled=lambda: True,
+                                       _daemon_answers=lambda **kw: asks.append(kw) or len(asks) >= 2)
+    monkeypatch.setitem(sys.modules, "backend.bridge", types.SimpleNamespace(shared_mcp=shared_mcp))
+    start = time.monotonic()
+    a._wait_for_ducky_tools(None)
+    assert len(asks) == 2 and time.monotonic() - start < 2.0
 
 
 @pytest.mark.parametrize("session", ["", "prior-session"])
