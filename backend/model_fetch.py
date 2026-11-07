@@ -88,8 +88,15 @@ def clear_model_cache() -> None:
     _PROVIDER_PRICING_CACHE.clear()
 
 
-def fetch_models(api_key: str, **_kw: Any) -> list[ModelInfo]:
-    return _fetch_anthropic(api_key)
+def api_root(base_url: str = "") -> str:
+    """The API root for a key's base URL (a proxy or self-hosted gateway); a trailing
+    /v1 is dropped since the SDK and the paths below add it."""
+    root = (base_url or "").strip().rstrip("/") or "https://api.anthropic.com"
+    return root[:-3] if root.endswith("/v1") else root
+
+
+def fetch_models(api_key: str, *, base_url: str = "", **_kw: Any) -> list[ModelInfo]:
+    return _fetch_anthropic(api_key, base_url)
 
 def _anthropic_price_lookup_key(model_id: str, display_name: str) -> str | None:
     dn = (display_name or "").strip()
@@ -258,7 +265,7 @@ def _anthropic_info_from_item(
     )
 
 
-def _fetch_anthropic(api_key: str) -> list[ModelInfo]:
+def _fetch_anthropic(api_key: str, base_url: str = "") -> list[ModelInfo]:
     import httpx
 
     headers = {
@@ -275,7 +282,7 @@ def _fetch_anthropic(api_key: str) -> list[ModelInfo]:
         if after_id:
             params["after_id"] = after_id
         r = httpx.get(
-            "https://api.anthropic.com/v1/models",
+            f"{api_root(base_url)}/v1/models",
             headers=headers,
             params=params,
             timeout=30.0,

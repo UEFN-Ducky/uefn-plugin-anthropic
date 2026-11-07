@@ -44,15 +44,23 @@ def _signed(blocks: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
 
 
 class AnthropicProvider:
-    def __init__(self, api_key: str, model: str, *, thinking_effort: str = "off") -> None:
+    def __init__(self, api_key: str, model: str, *, thinking_effort: str = "off", base_url: str = "") -> None:
         self._api_key = api_key
         self._model = model
         self._thinking_effort = normalize_thinking_effort(thinking_effort)
+        self._base_url = (base_url or "").strip()  # the key's proxy / self-hosted endpoint
 
     def _client(self):
         import anthropic
 
-        return anthropic.Anthropic(api_key=self._api_key)
+        if not self._base_url:
+            return anthropic.Anthropic(api_key=self._api_key)
+        try:
+            from .model_fetch import api_root
+        except ImportError:
+            from model_fetch import api_root
+
+        return anthropic.Anthropic(api_key=self._api_key, base_url=api_root(self._base_url))
 
     def _to_anthropic_messages(self, messages: list[ProviderMessage]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
