@@ -233,8 +233,62 @@ def test_safe_fallback_chain_preserves_effective_payload(launch, monkeypatch, se
 def test_unknown_required_flag_never_strips_optional_flag(launch, monkeypatch, marker):
     monkeypatch.setattr(a, "run_streaming_process", lambda **kw: launch.calls.append(kw) or ProcResult(returncode=1, stderr_tail=marker))
     result = launch.run()
-    assert not result.ok and len(launch.calls) == 1
+    # One quick retry (nothing ran), never a stripped flag.
+    assert not result.ok and len(launch.calls) == 2
+    assert launch.calls[0]["argv"] == launch.calls[1]["argv"]
     launch.update.assert_not_called()
+
+
+def test_a_quiet_start_failure_retries_once_and_goes_through(launch, monkeypatch):
+    def process(**kw):
+        launch.calls.append(kw)
+        if len(launch.calls) == 1:
+            emit_init(kw)
+            return ProcResult(returncode=1)
+        emit_success(kw)
+        return ProcResult(returncode=0)
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    result = launch.run("prior-session")
+    assert result.ok and result.reply_text == "answer" and len(launch.calls) == 2
+    assert launch.calls[0]["argv"] == launch.calls[1]["argv"]
+    assert launch.calls[0]["stdin_data"] == launch.calls[1]["stdin_data"]
+    assert any("trying once more" in str(e.get("text")) for e in launch.events)
+
+
+def test_a_second_quiet_start_failure_says_it_failed_twice(launch, monkeypatch):
+    def process(**kw):
+        launch.calls.append(kw)
+        emit_init(kw)
+        return ProcResult(returncode=1, stderr_tail="Error: boom")
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    result = launch.run()
+    assert not result.ok and len(launch.calls) == 2
+    assert result.error == ("Claude Code exited with code 1: Error: boom\n\n"
+                            "It failed the same way when Ducky tried again.")
+
+
+def test_a_slow_start_failure_is_not_retried(launch, monkeypatch):
+    clock = iter([0.0, 61.0])
+    monkeypatch.setattr(a.time, "monotonic", lambda: next(clock, 61.0))
+    monkeypatch.setattr(a, "run_streaming_process", lambda **kw: launch.calls.append(kw) or ProcResult(returncode=1))
+    assert not launch.run().ok and len(launch.calls) == 1
+
+
+def test_a_resumed_session_that_got_too_long_starts_fresh(launch, monkeypatch):
+    def process(**kw):
+        launch.calls.append(kw)
+        if "--resume" in kw["argv"]:
+            kw["on_line"](json.dumps({"type": "result", "is_error": True, "session_id": "big",
+                                     "result": "Prompt is too long"}))
+            return ProcResult(returncode=1)
+        emit_success(kw)
+        return ProcResult(returncode=0)
+    monkeypatch.setattr(a, "run_streaming_process", process)
+    result = launch.run("big")
+    assert result.ok and result.upstream_session_id == "saved-session" and len(launch.calls) == 2
+    second = launch.calls[1]["stdin_data"]
+    assert "got too long" in second and "user payload" in second
+    assert any("got too long" in str(e.get("text")) for e in launch.events)
 
 
 @pytest.mark.parametrize("stage", ["process", "classifier", "status", "updater", "resolver"])

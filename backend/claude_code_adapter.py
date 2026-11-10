@@ -550,6 +550,14 @@ def _quiet_attempt(state: "_StreamState", blocks: list[dict[str, Any]], streamed
 
 
 _COMPACT_TIMEOUT_S = 300.0
+_QUICK_RETRY_S = 60.0
+_TOO_LONG = re.compile(r"prompt is too long|context.?(window|length)|too many tokens|maximum context")
+# ponytail: a pointer to the chat, not a summary; the agent re-reads what it needs.
+_FRESH_AFTER_TOO_LONG = (
+    "<ducky-note>Your previous Claude Code session for this chat got too long for the model, so this "
+    "turn starts a fresh one. Every message is still in the chat: re-read only what you need "
+    "(ducky_read_chat, ducky_get_plan, project_memory_list) and carry on.</ducky-note>\n\n"
+)
 _TOOLS_RETRY_WAIT_S = 10.0
 
 
@@ -1405,6 +1413,7 @@ class ClaudeCodeAdapter:
             session_before = failover.session_snapshot(session_id, failover.config_dir(account)) if accounts_on else {}
             stdin_payload = full_prompt
             updated = False
+            quick_retried = False
             previous_result = None
             while True:
                 # A cancellation observed between attempts returns the original
@@ -1421,6 +1430,7 @@ class ClaudeCodeAdapter:
                     stdin_kw = {"keep_stdin_open": True, "on_stdin_writer": state.attach_stdin}
                     if not _CORE_FEEDS_STDIN_LATE:
                         state.pending_stdin, stdin_data = stdin_data or "", None
+                attempt_started = time.monotonic()
                 proc = run_streaming_process(
                     argv=argv, cwd=cwd, env_extra=claude_env(run_env), conv_id=conv_id,
                     on_line=state.on_line, timeout_s=timeout_s, cancel=cancel,
@@ -1483,6 +1493,16 @@ class ClaudeCodeAdapter:
                     session_id, session_before = "", {}
                     push({"type": "status", "conv_id": conv_id, "run_id": run_id,
                           "text": "This chat's Claude Code session was missing, so it started a fresh one."})
+                    continue
+                if (session_id and not terminal and not result.ok and "--resume" in argv and not blocks
+                        and not streamed and _TOO_LONG.search((state.error_text or result.error or "").lower())):
+                    # The resumed session outgrew the model's window: every turn on it would fail the same way.
+                    at = argv.index("--resume")
+                    argv = argv[:at] + argv[at + 2:]
+                    session_id, session_before = "", {}
+                    stdin_payload = _FRESH_AFTER_TOO_LONG + stdin_payload
+                    push({"type": "status", "conv_id": conv_id, "run_id": run_id,
+                          "text": "This chat's Claude Code session got too long, so it started a fresh one."})
                     continue
                 texts = (state.error_text, result.error, proc.stderr_tail)
                 if quiet:
@@ -1548,9 +1568,20 @@ class ClaudeCodeAdapter:
                         continue
                 from .cli_update import is_cli_too_old_error, update_claude_cli
 
-                if updated or cancelled() or not is_cli_too_old_error(
+                too_old = not updated and not cancelled() and is_cli_too_old_error(
                     result.error or "", result.reply_text or "", proc.stderr_tail, proc.raw_tail, state.error_text,
-                ):
+                )
+                if not too_old and not cancelled() and result.status == "error" and not failover.is_usage_limit_error(*texts):
+                    # Nov 9 2026: 115 Claude turns a day died within 10 s, before any tool call. Nothing
+                    # ran, so the same turn is safe to start once more; a second failure says so.
+                    if not quick_retried and time.monotonic() - attempt_started < _QUICK_RETRY_S:
+                        quick_retried = True
+                        push({"type": "status", "conv_id": conv_id, "run_id": run_id,
+                              "text": "Claude Code stopped before it started — trying once more…"})
+                        continue
+                    if quick_retried:
+                        result.error = f"{result.error or 'Claude Code failed'}\n\nIt failed the same way when Ducky tried again."
+                if not too_old:
                     return result
                 if cancelled():
                     return result
