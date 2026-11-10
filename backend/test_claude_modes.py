@@ -517,7 +517,8 @@ def test_nonzero_partial_is_failure_without_losing_content(launch, monkeypatch, 
             if content == "tool":
                 parts.append({"type": "tool_use", "id": "partial-tool", "name": "Read", "input": {}})
             kw["on_line"](json.dumps({"type": "assistant", "session_id": "kept", "message": {"content": parts}}))
-        return ProcResult(returncode=1, stderr_tail="PRIVATE_SYNTHETIC does not support this model; claude update",
+        return ProcResult(returncode=3221225477,
+                          stderr_tail="early\nnoise\nat C:\\Users\\someone\\x.js\ndoes not support this model; claude update",
                           raw_tail="PRIVATE_SYNTHETIC", **({terminal: True} if terminal else {}))
     monkeypatch.setattr(a, "run_streaming_process", process)
     classifier = Mock(side_effect=AssertionError("partial work classifier"))
@@ -533,7 +534,9 @@ def test_nonzero_partial_is_failure_without_losing_content(launch, monkeypatch, 
     assert result.requested_mode == "agent" and result.effective_mode == ""
     assert "PRIVATE_SYNTHETIC" not in json.dumps(result.to_dict()) + json.dumps(launch.events)
     if not terminal:
-        assert result.error == "Claude Code exited unsuccessfully. Partial output was retained; review it before retrying."
+        assert result.error == ("Claude Code exited with code 0xC0000005: noise | at ~\\x.js | "
+                                "does not support this model; claude update\n\n"
+                                "Partial output was retained; review it before retrying.")
         assert result.output_tail == ""
     assert len(launch.calls) == 1
     classifier.assert_not_called()

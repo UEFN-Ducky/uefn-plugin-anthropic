@@ -29,6 +29,10 @@ from backend.agent.coding_agents.base import (
 from .claude_auth import is_claude_logged_in, resolve_claude_bin
 from . import failover
 from backend.agent.coding_agents.cli_shared import finalize_cli_turn, truncate_tool_result
+try:
+    from backend.agent.coding_agents.cli_shared import exit_detail
+except ImportError:  # core before exit details (Nov 10 2026)
+    exit_detail = None
 from backend.agent.coding_agents import proc_exec as _proc_exec
 from backend.agent.coding_agents.proc_exec import run_streaming_process
 from backend.agent.coding_agents.settings_helpers import coding_agent_cfg
@@ -1447,7 +1451,9 @@ class ClaudeCodeAdapter:
                     # reply. Claude partial output does not prove completion.
                     result.ok = False
                     result.status = "error"
-                    result.error = "Claude Code exited unsuccessfully. Partial output was retained; review it before retrying."
+                    # Nov 9 2026: crashes after tools said nothing more; the exit code and last stderr lines say why.
+                    detail = exit_detail(proc, "Claude Code") if exit_detail else "Claude Code exited unsuccessfully"
+                    result.error = f"{detail}\n\nPartial output was retained; review it before retrying."
                     result.output_tail = ""
                 if not terminal and (state.ducky_connection_failed or (proc.returncode == 0 and not state.ducky_connected)):
                     if not tools_retried and not cancelled():
