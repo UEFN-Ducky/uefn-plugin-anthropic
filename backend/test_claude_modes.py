@@ -268,9 +268,13 @@ def test_a_second_quiet_start_failure_says_it_failed_twice(launch, monkeypatch):
 
 
 def test_a_slow_start_failure_is_not_retried(launch, monkeypatch):
-    clock = iter([0.0, 61.0])
-    monkeypatch.setattr(a.time, "monotonic", lambda: next(clock, 61.0))
-    monkeypatch.setattr(a, "run_streaming_process", lambda **kw: launch.calls.append(kw) or ProcResult(returncode=1))
+    now = [1000.0]
+    monkeypatch.setattr(a.time, "monotonic", lambda: now[0])
+    def process(**kw):
+        launch.calls.append(kw)
+        now[0] += 61.0  # this attempt took 61 s
+        return ProcResult(returncode=1)
+    monkeypatch.setattr(a, "run_streaming_process", process)
     assert not launch.run().ok and len(launch.calls) == 1
 
 

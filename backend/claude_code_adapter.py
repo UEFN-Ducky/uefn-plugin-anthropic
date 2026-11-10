@@ -1414,6 +1414,7 @@ class ClaudeCodeAdapter:
             stdin_payload = full_prompt
             updated = False
             quick_retried = False
+            attempts = 0
             previous_result = None
             while True:
                 # A cancellation observed between attempts returns the original
@@ -1430,6 +1431,7 @@ class ClaudeCodeAdapter:
                     stdin_kw = {"keep_stdin_open": True, "on_stdin_writer": state.attach_stdin}
                     if not _CORE_FEEDS_STDIN_LATE:
                         state.pending_stdin, stdin_data = stdin_data or "", None
+                attempts += 1
                 attempt_started = time.monotonic()
                 proc = run_streaming_process(
                     argv=argv, cwd=cwd, env_extra=claude_env(run_env), conv_id=conv_id,
@@ -1574,7 +1576,8 @@ class ClaudeCodeAdapter:
                 if not too_old and not cancelled() and result.status == "error" and not failover.is_usage_limit_error(*texts):
                     # Nov 9 2026: 115 Claude turns a day died within 10 s, before any tool call. Nothing
                     # ran, so the same turn is safe to start once more; a second failure says so.
-                    if not quick_retried and time.monotonic() - attempt_started < _QUICK_RETRY_S:
+                    # At most one extra launch per turn: never on top of a flag, update or session repair.
+                    if attempts == 1 and time.monotonic() - attempt_started < _QUICK_RETRY_S:
                         quick_retried = True
                         push({"type": "status", "conv_id": conv_id, "run_id": run_id,
                               "text": "Claude Code stopped before it started — trying once more…"})
