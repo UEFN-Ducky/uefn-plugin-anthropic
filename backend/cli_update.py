@@ -276,6 +276,48 @@ def needs_plugin_load_update() -> bool:
     return str(stamp.get("plugin_version") or "") != plugin_package_version()
 
 
+INSTALLING = "Claude Code isn't installed yet. Ducky is installing it now; press Log in again when the row says Logged out."
+_start_lock = threading.Lock()
+_failed_at = 0.0
+
+
+def _error_line(text: str) -> str:
+    """The installer's last non-empty line: the one that says what went wrong."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return lines[-1][:300] if lines else "install failed"
+
+
+def install_state() -> dict[str, Any]:
+    """``{pending: True}`` while the install runs, ``{error}`` after it failed, else ``{}``."""
+    if _busy:
+        return {"pending": True}
+    if _last.get("ok") is False:
+        return {"error": f"Claude Code install failed: {_error_line(str(_last.get('error') or ''))}"}
+    return {}
+
+
+def install_in_background(*, retry_after_s: float = 0.0) -> bool:
+    """Start installing the CLI on a thread; False when one runs or failed under ``retry_after_s`` ago."""
+    global _busy, _last
+    with _start_lock:
+        if _busy or (_last.get("ok") is False and time.monotonic() - _failed_at < retry_after_s):
+            return False
+        _busy, _last = True, {}
+
+    def _worker() -> None:
+        global _busy, _last, _failed_at
+        try:
+            res = update_claude_cli("")
+        except Exception as exc:  # never leave the row pending forever
+            res = {"ok": False, "error": str(exc)}
+        if not res.get("ok"):
+            _last, _failed_at = {"ok": False, "error": str(res.get("error") or "")}, time.monotonic()
+        _busy = False
+
+    threading.Thread(target=_worker, name="claude-cli-install", daemon=True).start()
+    return True
+
+
 def schedule_cli_update_on_plugin_load() -> None:
     """Background install/update after Store install/update or app start."""
     reason = install_skip_reason()

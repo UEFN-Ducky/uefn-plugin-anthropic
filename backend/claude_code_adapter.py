@@ -1258,7 +1258,15 @@ class ClaudeCodeAdapter:
                 status += f" · {extra}"
             available = enabled
         else:
-            status = _claude_code_missing_status()
+            # Setup's Check lands here: start the install (a failed one retries after 2 min).
+            from .cli_update import install_in_background, install_state
+
+            install_in_background(retry_after_s=120.0)
+            state = install_state()
+            if state.get("pending"):
+                status = "Installing Claude Code CLI… press Check again in a minute."
+            else:
+                status = str(state.get("error") or "") or _claude_code_missing_status()
             available = False
         info = CodingAgentInfo(
             id=self.id,

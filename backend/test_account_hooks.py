@@ -48,6 +48,89 @@ def test_login_runs_claude_auth_login_in_the_folder(monkeypatch):
     assert out == {"argv": ["claude.exe", "auth", "login"], "env": {"CLAUDE_CONFIG_DIR": "C:/acc"}}
 
 
+def _no_cli(monkeypatch):
+    auth = importlib.import_module(_NAME + ".claude_auth")
+    monkeypatch.setattr(auth, "resolve_claude_bin", lambda *_a: "")
+    monkeypatch.setattr(plugin, "_account_cli", lambda: "")
+    monkeypatch.setattr(cli_update, "_busy", False)
+    monkeypatch.setattr(cli_update, "_last", {})
+    monkeypatch.setattr(cli_update, "_failed_at", 0.0)
+
+
+def _fake_install(monkeypatch, result):
+    import threading
+
+    gate, calls = threading.Event(), []
+
+    def fake(_binary=""):
+        calls.append(1)
+        gate.wait(5)
+        cli_update._last = result  # update_claude_cli records its own result
+        return result
+
+    monkeypatch.setattr(cli_update, "update_claude_cli", fake)
+    return gate, calls
+
+
+def _wait_idle():
+    import time
+
+    for _ in range(100):
+        if not cli_update._busy:
+            return
+        time.sleep(0.02)
+    raise AssertionError("install never finished")
+
+
+def test_login_with_no_cli_installs_it_and_the_row_follows(monkeypatch):
+    """Nov 10 2026: Log in with only Claude Desktop did nothing but 'Claude Code CLI not found.'"""
+    _no_cli(monkeypatch)
+    gate, calls = _fake_install(monkeypatch, {"ok": True, "cli_path": "claude.exe"})
+    import pytest
+
+    with pytest.raises(ValueError, match="installing it now"):
+        plugin._account_login(None)
+    assert plugin._account_status(None) == {"loggedIn": False, "pending": True}
+    with pytest.raises(ValueError):
+        plugin._account_login(None)  # a second press while installing starts no second install
+    gate.set()
+    _wait_idle()
+    assert calls == [1]
+    assert plugin._account_status(None) == {"loggedIn": False}  # installed: plain Log in again
+
+
+def test_a_failed_install_shows_the_installer_error_line(monkeypatch):
+    _no_cli(monkeypatch)
+    gate, calls = _fake_install(monkeypatch, {"ok": False, "error": "Downloading...\nirm : The remote name could not be resolved\n"})
+    gate.set()
+    import pytest
+
+    with pytest.raises(ValueError):
+        plugin._account_login(None)
+    _wait_idle()
+    assert plugin._account_status(None) == {
+        "loggedIn": False, "error": "Claude Code install failed: irm : The remote name could not be resolved"}
+    with pytest.raises(ValueError):
+        plugin._account_login(None)  # Log in again retries at once
+    _wait_idle()
+    assert calls == [1, 1]
+
+
+def test_setup_check_with_no_cli_starts_the_install(monkeypatch):
+    _no_cli(monkeypatch)
+    adapter_mod = importlib.import_module(_NAME + ".claude_code_adapter")
+    monkeypatch.setattr(adapter_mod, "resolve_claude_bin", lambda *_a: "")
+    monkeypatch.setattr(adapter_mod, "coding_agent_cfg", lambda *_a: {})
+    gate, calls = _fake_install(monkeypatch, {"ok": False, "error": "boom"})
+    info = adapter_mod.ClaudeCodeAdapter().detect(None)
+    assert info.available is False and "Installing Claude Code CLI" in info.status
+    gate.set()
+    _wait_idle()
+    info = adapter_mod.ClaudeCodeAdapter().detect(None)
+    assert info.status == "Claude Code install failed: boom"
+    assert calls == [1]  # a failed install waits 2 min before Check retries it
+
+
 def test_status_runs_as_the_folder(monkeypatch):
     auth = importlib.import_module(_NAME + ".claude_auth")
     seen = []

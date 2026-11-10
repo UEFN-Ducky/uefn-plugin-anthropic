@@ -289,13 +289,21 @@ def _account_login(config_dir: Any) -> dict[str, Any]:
 
     binary = resolve_claude_bin(_account_cli())
     if not binary:
-        raise ValueError("Claude Code CLI not found.")
+        # Log in with no CLI installs it; the row reads Installing… then Logged out.
+        from .cli_update import INSTALLING, install_in_background
+
+        install_in_background()
+        raise ValueError(INSTALLING)
     return {"argv": [binary, "auth", "login"], "env": _account_env(config_dir)}
 
 
 def _account_status(config_dir: Any) -> dict[str, Any]:
-    from .claude_auth import claude_auth_status
+    from .claude_auth import claude_auth_status, resolve_claude_bin
 
+    if not resolve_claude_bin(_account_cli()):
+        from .cli_update import install_state
+
+        return {"loggedIn": False, **install_state()}
     s = claude_auth_status(_account_cli(), config_dir=config_dir)
     out: dict[str, Any] = {"loggedIn": bool(s.get("loggedIn"))}
     if s.get("email"):
