@@ -373,7 +373,7 @@ def historical_classes():
 
 @contextmanager
 def registered_profile(launch, monkeypatch, historical_classes, helper, caps, result_shape):
-    from backend.uefn_plugins import host
+    from backend.uefn_plugins.plugin_host import backends as host
     # Other plugin suites deliberately reload the host namespace at collection.
     # Patch the modules the real loader will import, not a stale collected alias.
     host_base = importlib.import_module("backend.agent.coding_agents.base")

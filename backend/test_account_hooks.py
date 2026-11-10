@@ -12,7 +12,7 @@ if _pkg is not None and Path(getattr(_pkg, "__file__", "") or ".").resolve().par
     for _k in [k for k in sys.modules if k == "backend" or k.startswith("backend.")]:
         del sys.modules[_k]
 
-from backend.uefn_plugins import host  # noqa: E402
+from backend.uefn_plugins.plugin_host import backends as host  # noqa: E402
 
 # Loaded the way Ducky loads the plugin, so its relative imports work.
 plugin = host._import_backend("claude_account_hooks_test", Path(__file__).resolve().parents[1], "backend")

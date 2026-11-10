@@ -8,6 +8,24 @@ module cached the port first (a runner that imported the app before pytest).
 import errno
 import os
 import socket
+import sys
+from pathlib import Path
+
+# Any test file run alone imports the app (UEFN-Ducky-Release beside this repo) as `backend`,
+# and the plugin's own flat modules (`usage`, ...) by name.
+_PLUGIN = Path(__file__).resolve().parent
+_APP = _PLUGIN.parents[1] / "UEFN-Ducky-Release" / "ducky_app"
+if str(_APP) not in sys.path:
+    sys.path.insert(0, str(_APP))
+if str(_PLUGIN / "backend") not in sys.path:
+    sys.path.append(str(_PLUGIN / "backend"))
+
+
+def pytest_configure(config):
+    # Default "prepend" imports backend/test_x.py as `backend.test_x`, binding `backend` to this
+    # plugin instead of the app, so most files only ran after test_claude_modes reset it.
+    config.option.importmode = "importlib"
+    import backend  # noqa: F401  # the app's, before pytest names a plugin test module after it
 
 _LIVE_PORTS = (4199, 4200)  # the Ducky window's panel server, the UEFN editor listener
 _LOOPBACK = ("127.0.0.1", "localhost", "::1", "0.0.0.0", "::")
