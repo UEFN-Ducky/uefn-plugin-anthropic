@@ -137,6 +137,20 @@ def read_cli_version(binary: str) -> str:
     return ".".join(str(p) for p in tup) if tup else ""
 
 
+def powershell_exe() -> str:
+    """Windows PowerShell by its full path: a bare "powershell" is only found through PATH,
+    and on PCs where that is broken the install failed "[WinError 2] The system cannot find
+    the file specified". Then PowerShell 7 (pwsh), then the bare name."""
+    import shutil
+
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+    for exe in (Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+                Path(root) / "Sysnative" / "WindowsPowerShell" / "v1.0" / "powershell.exe"):
+        if exe.is_file():
+            return str(exe)
+    return shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+
+
 def _install_cli() -> dict[str, Any]:
     if os.name != "nt":
         try:
@@ -152,7 +166,7 @@ def _install_cli() -> dict[str, Any]:
     )
     try:
         proc = _run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+            [powershell_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
             timeout_s=300,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

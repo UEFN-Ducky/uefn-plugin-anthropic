@@ -18,6 +18,24 @@ from cli_update import (
     version_less,
 )
 
+def test_installer_finds_powershell_without_path(tmp_path, monkeypatch):
+    """'[WinError 2] The system cannot find the file specified' on PCs whose PATH lacks
+    PowerShell: the installer now starts it by its full Windows path."""
+    exe = tmp_path / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ")
+    monkeypatch.setenv("SystemRoot", str(tmp_path))
+    monkeypatch.setenv("PATH", "")
+    assert cli_update.powershell_exe() == str(exe)
+    ran = []
+    monkeypatch.setattr(cli_update, "_run", lambda argv, **kw: ran.append(argv) or types.SimpleNamespace(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(cli_update.os, "name", "nt")
+    assert cli_update._install_cli() == {"ok": True}
+    assert ran[0][0] == str(exe)
+    exe.unlink()  # no Windows PowerShell at all: the bare name, as before
+    assert cli_update.powershell_exe() == "powershell"
+
+
 _ERR = (
     "API Error: 400 Claude Code 2.1.206 does not support this model; "
     "version 2.1.251 or newer is required. Run 'claude update', or update "
