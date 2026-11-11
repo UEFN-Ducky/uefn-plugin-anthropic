@@ -290,7 +290,8 @@ def needs_plugin_load_update() -> bool:
     return str(stamp.get("plugin_version") or "") != plugin_package_version()
 
 
-INSTALLING = "Claude Code isn't installed yet. Ducky is installing it now; press Log in again when the row says Logged out."
+# Newer apps wait for the install and start the sign-in by themselves (one click).
+INSTALLING = "Installing Claude Code… the sign-in starts by itself when it's done."
 _start_lock = threading.Lock()
 _failed_at = 0.0
 
@@ -304,7 +305,7 @@ def _error_line(text: str) -> str:
 def install_state() -> dict[str, Any]:
     """``{pending: True}`` while the install runs, ``{error}`` after it failed, else ``{}``."""
     if _busy:
-        return {"pending": True}
+        return {"pending": True, "installing": True}
     if _last.get("ok") is False:
         return {"error": f"Claude Code install failed: {_error_line(str(_last.get('error') or ''))}"}
     return {}

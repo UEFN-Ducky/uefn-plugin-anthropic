@@ -88,9 +88,9 @@ def test_login_with_no_cli_installs_it_and_the_row_follows(monkeypatch):
     gate, calls = _fake_install(monkeypatch, {"ok": True, "cli_path": "claude.exe"})
     import pytest
 
-    with pytest.raises(ValueError, match="installing it now"):
+    with pytest.raises(ValueError, match="sign-in starts by itself"):
         plugin._account_login(None)
-    assert plugin._account_status(None) == {"loggedIn": False, "pending": True}
+    assert plugin._account_status(None) == {"loggedIn": False, "pending": True, "installing": True}
     with pytest.raises(ValueError):
         plugin._account_login(None)  # a second press while installing starts no second install
     gate.set()
