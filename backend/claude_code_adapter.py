@@ -1118,6 +1118,11 @@ class _StreamState:
         # ponytail: no 5 s fallback timer, close() always marks the writer closed; core closes on exit/cancel.
         try:
             self._parse_result(data)
+            if not self.is_error:
+                # The reply is whole here, but the turn ends only when the CLI has exited
+                # (seconds later, after stdin closes): say so instead of leaving the last
+                # "Thinking" or tool line on screen as if work went on.
+                self._emit({"type": "status", "text": "Finishing up"})
         finally:
             self.close_stdin()
 
