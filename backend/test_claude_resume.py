@@ -60,12 +60,21 @@ def test_auto_compact_setting_goes_in_as_settings_json():
     assert "--settings" not in build_claude_argv(extra_args="", **base)
 
 
-def test_auto_compact_pref_reads_digits_only(monkeypatch):
+def test_auto_compact_defaults_to_300k_and_keeps_real_choices(monkeypatch):
     import frontend.ui_web.plugin_host_api as host_api
 
-    for raw, want in (("300000", 300000), ("", 0), ("abc", 0)):
-        monkeypatch.setattr(host_api, "prefs_plugin_get", lambda _pid, raw=raw: {"autoCompactWindow": raw})
-        assert _mod.auto_compact_window() == want
+    cases = (
+        ({}, 300000),                                            # never set: the default
+        ({"autoCompactAfter": "0"}, 0),                          # chose Claude Code's default
+        ({"autoCompactAfter": "500000"}, 500000),
+        ({"autoCompactWindow": ""}, 300000),                     # old "" can't mean an opt-out
+        ({"autoCompactWindow": "150000"}, 150000),               # old real choice is kept
+        ({"autoCompactWindow": "abc"}, 300000),
+        ({"autoCompactAfter": "0", "autoCompactWindow": "150000"}, 0),  # the new key wins
+    )
+    for prefs, want in cases:
+        monkeypatch.setattr(host_api, "prefs_plugin_get", lambda _pid, prefs=prefs: dict(prefs))
+        assert _mod.auto_compact_window() == want, prefs
 
 
 def test_tool_search_is_forced_unless_the_user_set_it(monkeypatch):

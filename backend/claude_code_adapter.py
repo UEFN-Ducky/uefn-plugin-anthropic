@@ -516,15 +516,28 @@ def prompt_cache_ttl_s(cache_creation: Any) -> int:
     return 0
 
 
+# Nov 17 2026 token audit: with no cap, Claude chats ran to 950K+ before compacting and 56% of
+# the spend was turns re-reading over 400K. Compacting at 300K would have saved 25-35%.
+DEFAULT_AUTO_COMPACT_WINDOW = 300_000
+
+
 def auto_compact_window() -> int:
-    """The Settings → LLMs "auto-compact after" choice in tokens; 0 = Claude Code's default."""
+    """The Settings → LLMs "auto-compact after" choice in tokens; 0 = Claude Code's default.
+
+    ``autoCompactAfter`` ("0" = Claude Code's default) replaced ``autoCompactWindow``, whose ""
+    meant both "never chosen" and "Claude Code default": an old 150K/300K/500K choice is kept,
+    an old "" gets the new default. Prefs never carry manifest defaults, so the default lives here."""
     try:
         from frontend.ui_web.plugin_host_api import prefs_plugin_get
 
-        raw = str(prefs_plugin_get("anthropic").get("autoCompactWindow") or "").strip()
+        prefs = prefs_plugin_get("anthropic")
     except Exception:
-        return 0
-    return int(raw) if raw.isdigit() else 0
+        return DEFAULT_AUTO_COMPACT_WINDOW
+    raw = str(prefs.get("autoCompactAfter") or "").strip()
+    if raw.isdigit():
+        return int(raw)
+    old = str(prefs.get("autoCompactWindow") or "").strip()
+    return int(old) if old.isdigit() and int(old) > 0 else DEFAULT_AUTO_COMPACT_WINDOW
 
 
 def claude_env(env: dict[str, str]) -> dict[str, str]:
