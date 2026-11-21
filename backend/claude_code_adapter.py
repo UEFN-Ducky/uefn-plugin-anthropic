@@ -604,7 +604,7 @@ def _compact_cold_session(argv: list[str], *, cwd: str, env: dict[str, str], con
                           push: Any, cancel: threading.Event | None) -> str:
     """Summarize a resumed session whose prompt cache went cold, before the turn re-sends it
     whole at full price. Returns the session to resume next; '' leaves the turn unchanged."""
-    push({"type": "status", "conv_id": conv_id, "run_id": run_id, "waiting": True,
+    push({"type": "status", "conv_id": conv_id, "run_id": run_id, "waiting": "compacting_idle",
           "text": "Compacting this chat first: it sat idle, and resending it whole would cost full price (about a minute)"})
     state = _StreamState(conv_id, run_id, lambda _event: None)
     proc = run_streaming_process(
@@ -971,8 +971,9 @@ class _StreamState:
                 # The CLI summarizes a conversation (it reached its size limit, or /compact):
                 # about a minute with no other output (Nov 2026: 44 times in three days, the
                 # chat showed only a counter). "waiting" keeps the line up, with its time,
-                # until the next event; a second init and compact_boundary follow when done.
-                self._emit({"type": "status", "text": COMPACTING, "waiting": True})
+                # until the next event (its word names the wait for the app's own records);
+                # a second init and compact_boundary follow when done.
+                self._emit({"type": "status", "text": COMPACTING, "waiting": "compacting"})
             elif subtype == "compact_boundary":
                 self._emit({"type": "status", "text": "Conversation compacted. Continuing"})
             return

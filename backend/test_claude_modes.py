@@ -755,8 +755,8 @@ def test_a_compaction_is_said_while_it_runs_and_when_it_is_done():
     system(subtype="status", status="compacting")
     system(subtype="status", status=None)  # the CLI clears its own flag: nothing new to say
     system(subtype="compact_boundary", content="Conversation compacted")
-    assert [(e["text"], bool(e.get("waiting"))) for e in events] == [
-        (a.COMPACTING, True), ("Conversation compacted. Continuing", False)]
+    assert [(e["text"], e.get("waiting")) for e in events] == [
+        (a.COMPACTING, "compacting"), ("Conversation compacted. Continuing", None)]
 
 
 
