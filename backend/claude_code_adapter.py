@@ -596,12 +596,16 @@ def _wait_for_ducky_tools(cancel: threading.Event | None) -> None:
         (cancel or threading.Event()).wait(0.25)
 
 
+# Shown with its running time after it: "... (about a minute) · 40s".
+COMPACTING = "Compacting the conversation to free up room (about a minute)"
+
+
 def _compact_cold_session(argv: list[str], *, cwd: str, env: dict[str, str], conv_id: str, run_id: str,
                           push: Any, cancel: threading.Event | None) -> str:
     """Summarize a resumed session whose prompt cache went cold, before the turn re-sends it
     whole at full price. Returns the session to resume next; '' leaves the turn unchanged."""
-    push({"type": "status", "conv_id": conv_id, "run_id": run_id,
-          "text": "Compacting this chat's session first: its cache went cold, so resending it whole costs full price."})
+    push({"type": "status", "conv_id": conv_id, "run_id": run_id, "waiting": True,
+          "text": "Compacting this chat first: it sat idle, and resending it whole would cost full price (about a minute)"})
     state = _StreamState(conv_id, run_id, lambda _event: None)
     proc = run_streaming_process(
         argv=argv, cwd=cwd, env_extra=claude_env(env), conv_id=conv_id, on_line=state.on_line,
@@ -963,6 +967,14 @@ class _StreamState:
                 # Only a connected uefn entry establishes this session's readiness.
                 text = f"Claude Code initialized · {model}" if model else "Claude Code initialized…"
                 self._emit({"type": "status", "text": text})
+            elif subtype == "status" and data.get("status") == "compacting":
+                # The CLI summarizes a conversation (it reached its size limit, or /compact):
+                # about a minute with no other output (Nov 2026: 44 times in three days, the
+                # chat showed only a counter). "waiting" keeps the line up, with its time,
+                # until the next event; a second init and compact_boundary follow when done.
+                self._emit({"type": "status", "text": COMPACTING, "waiting": True})
+            elif subtype == "compact_boundary":
+                self._emit({"type": "status", "text": "Conversation compacted. Continuing"})
             return
         if self.require_ducky and (not self.ducky_connected or self.ducky_connection_failed) and kind != "result":
             return

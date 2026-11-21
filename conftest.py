@@ -25,7 +25,34 @@ def pytest_configure(config):
     # Default "prepend" imports backend/test_x.py as `backend.test_x`, binding `backend` to this
     # plugin instead of the app, so most files only ran after test_claude_modes reset it.
     config.option.importmode = "importlib"
-    import backend  # noqa: F401  # the app's, before pytest names a plugin test module after it
+    import backend  # the app's, before pytest names a plugin test module after it
+
+    global _app_backend
+    _app_backend = backend
+
+
+_app_backend = None
+
+
+def _keep_app_backend():
+    """``backend`` names the app's package again.
+
+    Some test files drop the name while they load (``sys.modules.pop("backend")``) and what they
+    import next is already loaded, so nothing puts it back. pytest names the next test file
+    ``backend.test_x`` and filled the gap with this plugin's own backend folder: every later
+    test then imported the app from the wrong package (Nov 2026: 400 of 1,033 failed in a
+    whole-suite run while each file passed alone)."""
+    mod = sys.modules.get("backend")
+    if _app_backend is not None and str(_APP) not in str(getattr(mod, "__file__", "") or ""):
+        sys.modules["backend"] = _app_backend
+
+
+def pytest_collectstart(collector):  # before each test file is loaded
+    _keep_app_backend()
+
+
+def pytest_runtest_setup(item):
+    _keep_app_backend()
 
 _LIVE_PORTS = (4199, 4200)  # the Ducky window's panel server, the UEFN editor listener
 _LOOPBACK = ("127.0.0.1", "localhost", "::1", "0.0.0.0", "::")

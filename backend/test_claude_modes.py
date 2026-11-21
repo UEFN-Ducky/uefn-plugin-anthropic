@@ -748,6 +748,17 @@ def test_streaming_tool_input_reports_progress():
     assert texts == ["Writing workspace_write_file · 0 chars", "Writing workspace_write_file · 2.0 KB"]
 
 
+def test_a_compaction_is_said_while_it_runs_and_when_it_is_done():
+    events = []
+    state = a._StreamState("c1", "r1", events.append)
+    system = lambda **fields: state.on_line(json.dumps({"type": "system", **fields}))
+    system(subtype="status", status="compacting")
+    system(subtype="status", status=None)  # the CLI clears its own flag: nothing new to say
+    system(subtype="compact_boundary", content="Conversation compacted")
+    assert [(e["text"], bool(e.get("waiting"))) for e in events] == [
+        (a.COMPACTING, True), ("Conversation compacted. Continuing", False)]
+
+
 
 @pytest.mark.parametrize("key", CAPACITY_KEYS)
 @pytest.mark.parametrize("value", [0, 200000, 200000.0])
